@@ -25,6 +25,13 @@ builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof(Progr
 
 var app = builder.Build();
 
+// Apply pending migrations so a fresh database (e.g. an empty Docker volume) gets its schema.
+using (var scope = app.Services.CreateScope())
+{
+    scope.ServiceProvider.GetRequiredService<WriteDbContext>().Database.Migrate();
+    scope.ServiceProvider.GetRequiredService<ReadDbContext>().Database.Migrate();
+}
+
 app.MapPost("/api/orders", async (IMediator mediator, CreateOrderCommand command) =>
 {
     try
