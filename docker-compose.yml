@@ -1,0 +1,19 @@
+services:
+  ecomapi:
+    build:
+      context: ./EcomAPI
+      dockerfile: Dockerfile
+    image: ecomapi:latest
+    container_name: ecomapi
+    ports:
+      - "5025:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
+      ConnectionStrings__WriteDbConnection: "Data Source=/app/data/Write.db"
+      ConnectionStrings__ReadDbConnection: "Data Source=/app/data/Read.db"
+    volumes:
+      - ecom-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  ecom-data:

@@ -20,6 +20,7 @@ projecting optimized **read models**.
 -   RESTful API
 -   Entity Framework migrations
 -   Lightweight SQLite database
+-   Docker containerization
 
 ------------------------------------------------------------------------
 
@@ -143,9 +144,12 @@ flowchart TD
     ├── Data
     ├── Migrations
     │
+    ├── Dockerfile
     ├── Write.db
     ├── Read.db
     └── NoCQRS.db
+
+    docker-compose.yml
 
 ------------------------------------------------------------------------
 
@@ -168,6 +172,11 @@ flowchart TD
 -   SQLite
 -   Entity Framework Core
 
+## DevOps
+
+-   Docker
+-   Docker Compose
+
 ------------------------------------------------------------------------
 
 # Running the Application
@@ -182,8 +191,61 @@ cd eComAPI
 ## Run the API
 
 ``` bash
+cd EcomAPI
 dotnet run
 ```
+
+Pending EF Core migrations are applied automatically at startup.
+
+------------------------------------------------------------------------
+
+# Running with Docker
+
+The API ships with a multi-stage `Dockerfile` and a `docker-compose.yml`.
+SQLite databases are stored on a named volume (`ecom-data`) so data
+survives container restarts.
+
+## Start the container
+
+``` bash
+docker compose up --build -d
+```
+
+The API is available at `http://localhost:5025`. On first start the
+schema is created in the empty volume via EF Core migrations.
+
+## Try it out
+
+``` bash
+# Create an order
+curl -X POST http://localhost:5025/api/orders \
+  -H "Content-Type: application/json" \
+  -d '{"firstName":"Jane","lastName":"Doe","status":"Pending","totalCost":49.99}'
+
+# Get an order by id
+curl http://localhost:5025/api/orders/1
+
+# List order summaries
+curl http://localhost:5025/api/orders
+```
+
+## Logs, stop and reset
+
+``` bash
+docker compose logs -f        # follow logs
+docker compose down           # stop (data is kept)
+docker compose down -v        # stop and delete the database volume
+```
+
+## Configuration
+
+| Variable | Default (in container) |
+|----------|------------------------|
+| `ASPNETCORE_ENVIRONMENT` | `Production` |
+| `ConnectionStrings__WriteDbConnection` | `Data Source=/app/data/Write.db` |
+| `ConnectionStrings__ReadDbConnection` | `Data Source=/app/data/Read.db` |
+
+The container listens on port `8080` and runs as a non-root user.
 
 ------------------------------------------------------------------------
 
@@ -203,7 +265,7 @@ This project demonstrates:
 
 Future improvements may include:
 
--   Docker containerization
+-   ~~Docker containerization~~ ✅ (see [Running with Docker](#running-with-docker))
 -   Kafka or RabbitMQ event streaming
 -   Redis distributed caching
 -   Kubernetes deployment
