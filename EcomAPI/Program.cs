@@ -2,6 +2,7 @@ using EcomAPI.Commands;
 using EcomAPI.Data;
 using EcomAPI.Events;
 using EcomAPI.Handlers;
+using EcomAPI.Outbox;
 using EcomAPI.Projections;
 using FluentValidation;
 using MediatR;
@@ -18,7 +19,21 @@ builder.Services.AddDbContext<ReadDbContext>(opt => opt.UseSqlite(builder.Config
 // builder.Services.AddScoped<IQueryHandler<GetOrdersSummariesQuery, List<OrderSummaryDto>>, GetOrdersSummariesQueryHandler>();
 builder.Services.AddScoped<IValidator<CreateOrderCommand>, CreateOrderCommandValidator>();
 
-builder.Services.AddSingleton<IEventPublisher, InProcessEventPublisher>();
+builder.Services.Configure<KafkaOptions>(builder.Configuration.GetSection(KafkaOptions.SectionName));
+builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection(OutboxOptions.SectionName));
+
+// EventBus:Provider selects how outbox events reach the projections: "Kafka" or "InProcess" (no broker).
+var eventBusProvider = builder.Configuration["EventBus:Provider"] ?? "InProcess";
+if (eventBusProvider.Equals("Kafka", StringComparison.OrdinalIgnoreCase))
+{
+    builder.Services.AddSingleton<IEventPublisher, KafkaEventPublisher>();
+    builder.Services.AddHostedService<KafkaEventConsumer>();
+}
+else
+{
+    builder.Services.AddSingleton<IEventPublisher, InProcessEventPublisher>();
+}
+builder.Services.AddHostedService<OutboxDispatcher>();
 // builder.Services.AddScoped<IEventHandler<OrderCreatedEvent>, OrderCreatedProjectionHandler>();
 
 builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof(Program).Assembly));

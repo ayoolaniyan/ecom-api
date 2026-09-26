@@ -2,6 +2,7 @@ using EcomAPI.Data;
 using EcomAPI.Events;
 using EcomAPI.Models;
 using MediatR;
+using Microsoft.EntityFrameworkCore;
 
 namespace EcomAPI.Projections
 {
@@ -15,13 +16,17 @@ namespace EcomAPI.Projections
 
         public async Task Handle(OrderCreatedEvent notification, CancellationToken cancellationToken)
         {
+            // Events are delivered at least once; ignore a redelivery of an order already projected.
+            if (await _context.Orders.AnyAsync(o => o.Id == notification.OrderId, cancellationToken))
+                return;
+
             var order = new Order
             {
                 Id = notification.OrderId,
                 FirstName = notification.FirstName,
                 LastName = notification.LastName,
-                Status = "CreatedAt",
-                CreatedAt = DateTime.Now,
+                Status = notification.Status,
+                CreatedAt = notification.CreatedAt,
                 TotalCost = notification.TotalCost
             };
 

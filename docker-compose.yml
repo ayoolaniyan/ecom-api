@@ -1,4 +1,37 @@
 services:
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: ecom-kafka
+    ports:
+      # Host access for local development (`dotnet run` with EventBus__Provider=Kafka)
+      - "9094:9094"
+    environment:
+      # Single-node KRaft cluster (broker + controller, no ZooKeeper)
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created explicitly by the API with the configured partition count
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
   ecomapi:
     build:
       context: ./EcomAPI
@@ -11,9 +44,15 @@ services:
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
       ConnectionStrings__WriteDbConnection: "Data Source=/app/data/Write.db"
       ConnectionStrings__ReadDbConnection: "Data Source=/app/data/Read.db"
+      EventBus__Provider: Kafka
+      Kafka__BootstrapServers: kafka:9092
     volumes:
       - ecom-data:/app/data
+    depends_on:
+      kafka:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   ecom-data:
+  kafka-data:
