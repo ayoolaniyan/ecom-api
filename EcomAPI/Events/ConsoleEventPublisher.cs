@@ -1,10 +1,12 @@
+using EcomAPI.Outbox;
+
 namespace EcomAPI.Events
 {
     public class ConsoleEventPublisher : IEventPublisher
     {
-        public Task PublishAsync<TEvent>(TEvent evt)
+        public Task PublishAsync(OutboxMessage message, CancellationToken cancellationToken = default)
         {
-            Console.WriteLine($"--> Event published: {evt}");
+            Console.WriteLine($"--> Event published: {message.Type} {message.Payload}");
             return Task.CompletedTask;
         }
     }

@@ -2,6 +2,7 @@ using EcomAPI.Data;
 using EcomAPI.Events;
 using EcomAPI.Handlers;
 using EcomAPI.Models;
+using EcomAPI.Outbox;
 using FluentValidation;
 using MediatR;
 
@@ -9,15 +10,12 @@ public class CreateOrderCommandHandler : IRequestHandler<CreateOrderCommand, Ord
 {
     private readonly WriteDbContext _context;
     private readonly IValidator<CreateOrderCommand> _validator;
-    private readonly IMediator _mediator;
     public CreateOrderCommandHandler(
         WriteDbContext context, 
-        IValidator<CreateOrderCommand> validator, 
-        IMediator mediator)
+        IValidator<CreateOrderCommand> validator)
     {
         _context = context;
         _validator = validator;
-        _mediator = mediator;
     }
 
     public async Task<OrderDto> Handle(CreateOrderCommand request, CancellationToken cancellationToken)
@@ -38,18 +36,26 @@ public class CreateOrderCommandHandler : IRequestHandler<CreateOrderCommand, Ord
                 TotalCost = request.TotalCost
             };
 
+        // Save the order and its event atomically; OutboxDispatcher publishes the event afterwards.
+        await using var transaction = await _context.Database.BeginTransactionAsync(cancellationToken);
+
         await _context.Orders.AddAsync(order, cancellationToken);
         await _context.SaveChangesAsync(cancellationToken);
 
-        var ordeerCreatedEvent = new OrderCreatedEvent
+        var orderCreatedEvent = new OrderCreatedEvent
         (
             order.Id,
             order.FirstName,
             order.LastName,
+            order.Status,
+            order.CreatedAt,
             order.TotalCost
         );
 
-        await _mediator.Publish(ordeerCreatedEvent);
+        await _context.OutboxMessages.AddAsync(OutboxMessage.Create(orderCreatedEvent, key: order.Id.ToString()), cancellationToken);
+        await _context.SaveChangesAsync(cancellationToken);
+
+        await transaction.CommitAsync(cancellationToken);
 
         return new OrderDto(
             order.Id,
