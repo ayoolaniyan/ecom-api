@@ -1,0 +1,48 @@
+{{- $base := printf "http://%s:%v" (include "ecom-api.api.fullname" .) .Values.api.service.port -}}
+# `helm test <release>`: creates an order through the API, then reads it back once the
+# event has gone through the outbox (and Kafka, when enabled) into the read model.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "ecom-api.fullname" . }}-test
+  labels:
+    {{- include "ecom-api.labels" . | nindent 4 }}
+    {{- include "ecom-api.selectorLabels" (dict "ctx" . "component" "test") | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: smoke-test
+      image: curlimages/curl:8.11.1
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      command: ["/bin/sh", "-ec"]
+      args:
+        - |
+          echo "--- readiness"
+          curl -fsS {{ $base }}/healthz/ready
+
+          echo "--- create order"
+          created=$(curl -fsS -X POST {{ $base }}/api/orders \
+            -H "Content-Type: application/json" \
+            -d '{"firstName":"Helm","lastName":"Test","status":"Pending","totalCost":9.99}')
+          echo "$created"
+          id=$(echo "$created" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+          [ -n "$id" ] || { echo "no id in response"; exit 1; }
+
+          echo "--- wait for order $id in the read model"
+          for i in $(seq 1 30); do
+            if curl -fsS {{ $base }}/api/orders/$id; then echo; echo "OK"; exit 0; fi
+            sleep 2
+          done
+          echo "order $id never reached the read model"
+          exit 1

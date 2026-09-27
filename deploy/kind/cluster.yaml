@@ -1,0 +1,14 @@
+# Local cluster for deploy/kind/up.sh: three workers so the three Kafka nodes can be spread
+# across nodes, and the API's NodePort (30025) mapped to http://localhost:5026.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ecom
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30025
+        hostPort: 5026
+        protocol: TCP
+  - role: worker
+  - role: worker
+  - role: worker

@@ -1,0 +1,57 @@
+{{- if .Values.kafka.enabled }}
+{{- $minIsr := int (index .Values.kafka.config "min.insync.replicas") }}
+{{- $brokers := 0 }}
+{{- range .Values.kafka.nodePools }}
+{{- if has "broker" .roles }}{{ $brokers = add $brokers .replicas }}{{ end }}
+{{- end }}
+{{- if lt $brokers 1 }}
+{{- fail "kafka.nodePools must include at least one pool with the broker role" }}
+{{- end }}
+{{- if gt (int .Values.kafka.topic.replicas) $brokers }}
+{{- fail (printf "kafka.topic.replicas (%d) cannot exceed the number of brokers (%d)" (int .Values.kafka.topic.replicas) $brokers) }}
+{{- end }}
+{{- if ge $minIsr (int .Values.kafka.topic.replicas) }}
+{{- fail "kafka.config min.insync.replicas must be lower than kafka.topic.replicas, or acks=all writes stop when any broker is down" }}
+{{- end }}
+# KRaft-mode Kafka cluster managed by the Strimzi Cluster Operator. The nodes themselves
+# are defined by the KafkaNodePool resources in nodepools.yaml.
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  name: {{ include "ecom-api.kafka.clusterName" . }}
+  labels:
+    {{- include "ecom-api.labels" . | nindent 4 }}
+    {{- include "ecom-api.selectorLabels" (dict "ctx" . "component" "kafka") | nindent 4 }}
+spec:
+  kafka:
+    version: {{ .Values.kafka.version | quote }}
+    listeners:
+      # Plaintext inside the cluster, used by the API: <cluster>-kafka-bootstrap:9092
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+      # TLS listener for clients that need encryption in transit: <cluster>-kafka-bootstrap:9093
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+    {{- if .Values.kafka.rack.enabled }}
+    rack:
+      topologyKey: {{ .Values.kafka.rack.topologyKey }}
+    {{- end }}
+    config:
+      {{- range $key, $value := .Values.kafka.config }}
+      {{ $key }}: {{ $value }}
+      {{- end }}
+      {{- if .Values.kafka.rack.enabled }}
+      replica.selector.class: org.apache.kafka.common.replica.RackAwareReplicaSelector
+      {{- end }}
+  entityOperator:
+    # Reconciles KafkaTopic resources (topic.yaml) into the cluster.
+    topicOperator:
+      {{- with .Values.kafka.entityOperator.topicOperator.resources }}
+      resources:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

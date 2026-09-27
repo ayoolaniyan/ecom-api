@@ -1,0 +1,20 @@
+{{- if .Values.kafka.enabled }}
+# The API also tries to create this topic on startup and ignores TopicAlreadyExists, so
+# whichever runs first wins; the Topic Operator then keeps partitions and config in sync.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: {{ .Values.kafka.topic.name | replace "_" "-" | lower }}
+  labels:
+    {{- include "ecom-api.labels" . | nindent 4 }}
+    {{- include "ecom-api.selectorLabels" (dict "ctx" . "component" "kafka") | nindent 4 }}
+    strimzi.io/cluster: {{ include "ecom-api.kafka.clusterName" . }}
+spec:
+  topicName: {{ .Values.kafka.topic.name }}
+  partitions: {{ .Values.kafka.topic.partitions }}
+  replicas: {{ .Values.kafka.topic.replicas }}
+  {{- with .Values.kafka.topic.config }}
+  config:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

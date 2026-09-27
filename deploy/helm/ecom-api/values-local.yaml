@@ -1,0 +1,40 @@
+# Laptop-sized overrides for a local kind cluster (see deploy/kind/up.sh):
+#   helm install ecom deploy/helm/ecom-api -n ecom -f deploy/helm/ecom-api/values-local.yaml
+# Kafka still runs 3 brokers with RF=3 / min.insync.replicas=2, but each node is both
+# controller and broker to halve the number of JVMs.
+
+api:
+  image:
+    repository: ecomapi
+    tag: local
+    # The image is side-loaded with `kind load docker-image`, never pulled.
+    pullPolicy: Never
+  environment: Development
+  service:
+    type: NodePort
+    nodePort: 30025
+  persistence:
+    size: 256Mi
+
+kafka:
+  nodePools:
+    - name: dual-role
+      roles: [controller, broker]
+      replicas: 3
+      storage:
+        size: 2Gi
+        class: ""
+        deleteClaim: true
+      resources:
+        requests:
+          cpu: 200m
+          memory: 1Gi
+        limits:
+          memory: 1Gi
+      jvmOptions:
+        -Xms: 512m
+        -Xmx: 512m
+
+redis:
+  persistence:
+    size: 256Mi

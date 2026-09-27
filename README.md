@@ -174,6 +174,7 @@ model shortly after the `POST` returns (typically within about a second).
     ├── Projections
     ├── Outbox
     ├── Caching
+    ├── Health
     ├── Models
     ├── DTOs
     ├── Data
@@ -185,6 +186,10 @@ model shortly after the `POST` returns (typically within about a second).
     └── NoCQRS.db
 
     docker-compose.yml
+
+    deploy
+    ├── helm/ecom-api      Helm chart (API, Strimzi Kafka, Redis)
+    └── kind               Local kind cluster config and scripts
 
 ------------------------------------------------------------------------
 
@@ -221,6 +226,9 @@ model shortly after the `POST` returns (typically within about a second).
 
 -   Docker
 -   Docker Compose
+-   Kubernetes
+-   Helm
+-   Strimzi (Kafka operator)
 
 ------------------------------------------------------------------------
 
@@ -432,6 +440,151 @@ docker exec ecom-redis redis-cli FLUSHALL
 
 ------------------------------------------------------------------------
 
+# Deploying to Kubernetes
+
+The `deploy/helm/ecom-api` Helm chart deploys the API with Redis and a
+Kafka cluster managed by the [Strimzi](https://strimzi.io) operator.
+
+| Component | Kubernetes resources | Notes |
+|-----------|----------------------|-------|
+| API | Deployment, Service, ConfigMap, Secret, PVC | 1 replica, `Recreate` rollout, SQLite on a persistent volume |
+| Kafka | Strimzi `Kafka`, `KafkaNodePool`, `KafkaTopic` | KRaft mode, 3 controllers + 3 brokers, RF 3, `min.insync.replicas` 2 |
+| Redis | StatefulSet, Service | AOF persistence, 256 MB LRU |
+
+## Production Kafka with Strimzi
+
+The Strimzi Cluster Operator runs the Kafka cluster from the chart's custom
+resources:
+
+-   **Separate node pools.** Three `controller` nodes form the KRaft
+    metadata quorum and tolerate one failure. Three `broker` nodes store the
+    data. Broker load cannot destabilise the quorum.
+-   **Replication.** The `orders.order-created` topic has 3 partitions ×
+    3 replicas with `min.insync.replicas=2`. The API's producer uses
+    `acks=all` with idempotence, so writes stay durable and available when
+    one broker is lost. The chart refuses to render settings that would
+    break this, such as a replication factor above the broker count, or
+    `min.insync.replicas` ≥ the replication factor.
+-   **Topic as code.** The topic is a `KafkaTopic` resource reconciled by
+    the Topic Operator. Automatic topic creation is disabled.
+-   **Scheduling and storage.** Pods of each pool prefer different nodes
+    (`kafka.podAntiAffinity`, can be `required`). Rack awareness across zones
+    is available with `kafka.rack.enabled`. Storage is JBOD persistent
+    volumes, which are kept when the cluster is deleted.
+-   **Listeners.** A plaintext listener (`9092`) is used by the API, and a
+    TLS listener (`9093`) is available for other clients.
+-   **Rolling updates.** Strimzi handles rolling restarts, upgrades and
+    `PodDisruptionBudget`s.
+
+## Health checks
+
+The API exposes two endpoints, used by the pod's probes:
+
+| Endpoint | Probe | Checks |
+|----------|-------|--------|
+| `/healthz/live` | startup, liveness | Process is serving requests |
+| `/healthz/ready` | readiness | Write/read databases (required), Kafka and Redis (`Degraded` only) |
+
+Kafka and Redis only degrade readiness. Writes are buffered in the outbox
+and reads fall back to the database, so a broker or cache outage doesn't
+take the API out of its Service. `/healthz/ready` returns a JSON report
+per check.
+
+## Run locally with kind
+
+Prerequisites: Docker, [kind](https://kind.sigs.k8s.io), `kubectl` and
+Helm 3+. Give Docker at least 8 GB of memory.
+
+``` bash
+./deploy/kind/up.sh
+```
+
+The script:
+
+1.  Creates a kind cluster `ecom` with 1 control plane and 3 workers.
+2.  Builds the image as `ecomapi:local` and loads it into the cluster.
+3.  Installs the Strimzi operator (namespace `strimzi`, watching `ecom`).
+4.  Installs the chart into `ecom` with `values-local.yaml`.
+5.  Waits for Kafka and runs `helm test`, which creates an order and reads
+    it back from the read model.
+
+`values-local.yaml` still runs 3 Kafka nodes with the same replication
+settings. Each node is both controller and broker, and resources are
+smaller.
+
+The API is published on `http://localhost:5026` (NodePort `30025`). This
+is a different port from Docker Compose's `5025`, so both can run at once.
+
+``` bash
+curl http://localhost:5026/healthz/ready
+curl -X POST http://localhost:5026/api/orders \
+  -H "Content-Type: application/json" \
+  -d '{"firstName":"Jane","lastName":"Doe","status":"Pending","totalCost":49.99}'
+curl http://localhost:5026/api/orders
+
+kubectl -n ecom get kafka,kafkanodepool,kafkatopic,pods
+kubectl -n ecom logs deploy/ecom-api -f
+
+./deploy/kind/down.sh   # delete the cluster and all its data
+```
+
+## Deploy to a cluster
+
+``` bash
+# 1. Strimzi Cluster Operator (once per cluster)
+helm repo add strimzi https://strimzi.io/charts/
+helm install strimzi-operator strimzi/strimzi-kafka-operator \
+  --version 1.2.0 --namespace strimzi --create-namespace \
+  --set 'watchNamespaces={ecom}'
+
+# 2. Push the API image to a registry the cluster can pull from
+docker build -t <registry>/ecomapi:1.0.0 EcomAPI
+docker push <registry>/ecomapi:1.0.0
+
+# 3. The application
+helm install ecom-api deploy/helm/ecom-api \
+  --namespace ecom --create-namespace \
+  --set api.image.repository=<registry>/ecomapi
+
+helm test ecom-api -n ecom --logs
+```
+
+The `ecom` namespace must exist before the operator is installed, because
+the operator creates its RoleBindings there. Create it with
+`kubectl create namespace ecom`.
+
+Useful values (see `values.yaml` for all of them):
+
+| Value | Default | Purpose |
+|-------|---------|---------|
+| `api.image.repository` / `tag` | `ecomapi` / appVersion | API image |
+| `api.persistence.size` / `storageClass` | `1Gi` / default | SQLite volume |
+| `kafka.nodePools` | 3 controllers, 3 brokers | KRaft node pools, sizes, storage, JVM heap |
+| `kafka.topic.*` | 3 partitions, RF 3 | Events topic |
+| `kafka.enabled` / `kafka.externalBootstrapServers` | `true` / empty | Use an existing Kafka instead of Strimzi |
+| `redis.enabled` / `redis.externalConnection` | `true` / empty | Use an existing Redis (stored in a Secret) |
+
+With both Kafka options off, the API falls back to the in-process event
+bus. With both Redis options off, it uses the in-memory cache only.
+
+## Limitations
+
+-   **The API runs a single replica.** Its write and read stores are SQLite
+    files on a `ReadWriteOnce` volume, and the outbox dispatcher assumes a
+    single instance. The chart rejects `api.replicaCount > 1` and rolls out
+    with `Recreate`. Scaling out would need a server database (e.g.
+    PostgreSQL) and a lock or leader election for the outbox dispatcher.
+    Kafka and Redis already support multiple instances.
+-   **Redis is a single instance.** This is acceptable for a cache, since
+    the API keeps working without it. Use Redis Sentinel/Cluster or a
+    managed service through `redis.externalConnection` for HA.
+-   **The Kafka listener the API uses is plaintext and unauthenticated.** For
+    untrusted networks, move the API to the TLS listener with SCRAM or mTLS
+    `KafkaUser`s. This needs security settings in the Kafka client
+    configuration.
+
+------------------------------------------------------------------------
+
 # Learning Goals
 
 This project demonstrates:
@@ -451,6 +604,6 @@ Future improvements may include:
 -   ~~Docker containerization~~ ✅ (see [Running with Docker](#running-with-docker))
 -   ~~Kafka or RabbitMQ event streaming~~ ✅ (see [Event Streaming with Kafka](#event-streaming-with-kafka))
 -   ~~Redis distributed caching~~ ✅ (see [Distributed Caching with Redis](#distributed-caching-with-redis))
--   Kubernetes deployment
+-   ~~Kubernetes deployment~~ ✅ (see [Deploying to Kubernetes](#deploying-to-kubernetes))
 -   distributed tracing
 -   observability stack

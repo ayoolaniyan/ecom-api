@@ -1,0 +1,204 @@
+# Default values are production-oriented: a 3-controller / 3-broker Kafka cluster with
+# replicated topics, and persistent storage everywhere. See values-local.yaml for a
+# laptop-sized override used with kind.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ------------------------------------------------------------------------------
+# API
+# ------------------------------------------------------------------------------
+api:
+  image:
+    repository: ecomapi
+    # Defaults to the chart appVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+
+  # The write and read stores are SQLite files on a ReadWriteOnce volume, and the outbox
+  # dispatcher assumes a single instance, so the API cannot be scaled out. Replicas stay
+  # at 1 and rollouts use Recreate so two pods never open the same database file.
+  replicaCount: 1
+
+  environment: Production
+
+  service:
+    type: ClusterIP
+    port: 80
+    # Only used when type is NodePort.
+    nodePort: null
+
+  persistence:
+    size: 1Gi
+    # Empty uses the cluster's default StorageClass.
+    storageClass: ""
+    accessMode: ReadWriteOnce
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+  # Settings passed to the app as configuration (see EcomAPI/appsettings.json).
+  config:
+    outbox:
+      pollingIntervalMs: 1000
+      batchSize: 50
+    cache:
+      instanceName: "ecomapi:"
+      orderTtlSeconds: 300
+      summariesTtlSeconds: 30
+      localTtlSeconds: 10
+    # Extra environment variables, e.g. {name: Logging__LogLevel__Default, value: Debug}.
+    extraEnv: []
+
+  podSecurityContext:
+    # UID/GID of the non-root "app" user in the mcr.microsoft.com/dotnet/aspnet image.
+    runAsNonRoot: true
+    runAsUser: 1654
+    runAsGroup: 1654
+    fsGroup: 1654
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+  probes:
+    startup:
+      # Migrations run before the app starts listening; allow up to 2 minutes.
+      periodSeconds: 5
+      failureThreshold: 24
+    liveness:
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+    readiness:
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ------------------------------------------------------------------------------
+# Kafka (Strimzi). Requires the Strimzi Cluster Operator watching the release namespace.
+# ------------------------------------------------------------------------------
+kafka:
+  enabled: true
+  # Used instead of the Strimzi cluster when enabled is false, e.g. "broker-1:9092,broker-2:9092".
+  # Leave both disabled and empty to fall back to the in-process event bus.
+  externalBootstrapServers: ""
+
+  # Name of the Kafka custom resource; defaults to "<release fullname>-kafka".
+  clusterName: ""
+  version: 4.3.1
+
+  # KRaft node pools. Production separates controllers (metadata quorum) from brokers so
+  # broker load never affects quorum stability. Three controllers tolerate one failure.
+  nodePools:
+    - name: controller
+      roles: [controller]
+      replicas: 3
+      storage:
+        size: 10Gi
+        class: ""
+        deleteClaim: false
+      resources:
+        requests:
+          cpu: 250m
+          memory: 1Gi
+        limits:
+          memory: 1Gi
+      jvmOptions:
+        -Xms: 512m
+        -Xmx: 512m
+    - name: broker
+      roles: [broker]
+      replicas: 3
+      storage:
+        size: 100Gi
+        class: ""
+        deleteClaim: false
+      resources:
+        requests:
+          cpu: "1"
+          memory: 4Gi
+        limits:
+          memory: 4Gi
+      jvmOptions:
+        -Xms: 2g
+        -Xmx: 2g
+
+  # "preferred" spreads the pods of each pool across nodes when possible; "required"
+  # refuses to co-locate them (needs at least as many nodes as replicas); "none" disables it.
+  podAntiAffinity: preferred
+
+  # Rack awareness spreads partition replicas across zones. Needs nodes labelled with the key.
+  rack:
+    enabled: false
+    topologyKey: topology.kubernetes.io/zone
+
+  # Broker config. With 3 brokers, RF=3 and min.insync.replicas=2 keep acks=all writes
+  # (used by the API's idempotent producer) available through the loss of one broker.
+  config:
+    default.replication.factor: 3
+    min.insync.replicas: 2
+    offsets.topic.replication.factor: 3
+    transaction.state.log.replication.factor: 3
+    transaction.state.log.min.isr: 2
+    auto.create.topics.enable: false
+
+  # Topic consumed by the read-model projection, managed by the Strimzi Topic Operator.
+  topic:
+    name: orders.order-created
+    partitions: 3
+    replicas: 3
+    config:
+      min.insync.replicas: 2
+      retention.ms: "604800000"  # 7 days (quoted: Helm renders large numbers in scientific notation)
+      cleanup.policy: delete
+
+  consumerGroupId: ecomapi-read-projection
+
+  entityOperator:
+    topicOperator:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          memory: 512Mi
+
+# ------------------------------------------------------------------------------
+# Redis (HybridCache L2). A single persistent instance; the API keeps serving from the
+# database if it is unavailable.
+# ------------------------------------------------------------------------------
+redis:
+  enabled: true
+  # Used instead of the bundled instance when enabled is false, e.g. "my-redis:6379,password=...".
+  # Leave both disabled and empty to fall back to the in-memory cache only.
+  externalConnection: ""
+
+  image:
+    repository: redis
+    tag: 7-alpine
+    pullPolicy: IfNotPresent
+  maxmemory: 256mb
+  maxmemoryPolicy: allkeys-lru
+  persistence:
+    size: 1Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 384Mi

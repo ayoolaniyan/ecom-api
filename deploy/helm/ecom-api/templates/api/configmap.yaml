@@ -1,0 +1,30 @@
+{{- $bootstrap := include "ecom-api.kafka.bootstrapServers" . -}}
+{{- $redis := include "ecom-api.redis.connection" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ecom-api.api.fullname" . }}
+  labels:
+    {{- include "ecom-api.labels" . | nindent 4 }}
+    {{- include "ecom-api.selectorLabels" (dict "ctx" . "component" "api") | nindent 4 }}
+data:
+  ASPNETCORE_ENVIRONMENT: {{ .Values.api.environment | quote }}
+  ConnectionStrings__WriteDbConnection: "Data Source=/app/data/Write.db"
+  ConnectionStrings__ReadDbConnection: "Data Source=/app/data/Read.db"
+  Outbox__PollingIntervalMs: {{ .Values.api.config.outbox.pollingIntervalMs | quote }}
+  Outbox__BatchSize: {{ .Values.api.config.outbox.batchSize | quote }}
+  {{- if $bootstrap }}
+  EventBus__Provider: Kafka
+  Kafka__BootstrapServers: {{ $bootstrap | quote }}
+  Kafka__Topic: {{ .Values.kafka.topic.name | quote }}
+  Kafka__ConsumerGroupId: {{ .Values.kafka.consumerGroupId | quote }}
+  Kafka__TopicPartitions: {{ .Values.kafka.topic.partitions | quote }}
+  Kafka__TopicReplicationFactor: {{ .Values.kafka.topic.replicas | quote }}
+  {{- else }}
+  EventBus__Provider: InProcess
+  {{- end }}
+  Cache__Provider: {{ ternary "Redis" "Memory" (ne $redis "") | quote }}
+  Cache__InstanceName: {{ .Values.api.config.cache.instanceName | quote }}
+  Cache__OrderTtlSeconds: {{ .Values.api.config.cache.orderTtlSeconds | quote }}
+  Cache__SummariesTtlSeconds: {{ .Values.api.config.cache.summariesTtlSeconds | quote }}
+  Cache__LocalTtlSeconds: {{ .Values.api.config.cache.localTtlSeconds | quote }}
