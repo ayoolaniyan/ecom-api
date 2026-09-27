@@ -1,0 +1,67 @@
+# OpenTelemetry Collector: the single OTLP endpoint the API exports to. It batches the
+# signals and routes each one to its backend: traces → Tempo, metrics → Prometheus, logs → Loki.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Refuse data rather than run out of memory when a backend is slow.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+  batch: {}
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Scraped by Prometheus. OpenMetrics format carries the trace exemplars on histograms.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    enable_open_metrics: true
+    # Copy resource attributes (service.name, deployment.environment.name, ...) onto every series.
+    resource_to_telemetry_conversion:
+      enabled: true
+    # Drop series the API stopped sending (e.g. after a restart) instead of repeating them for 5m.
+    metric_expiration: 1m
+
+  # Loki's native OTLP endpoint; trace_id/span_id and log attributes become structured metadata.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/loki]
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888

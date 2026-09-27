@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using Confluent.Kafka;
 using EcomAPI.Outbox;
-using EcomAPI.Tracing;
+using EcomAPI.Observability;
 using Microsoft.Extensions.Options;
 
 namespace EcomAPI.Events

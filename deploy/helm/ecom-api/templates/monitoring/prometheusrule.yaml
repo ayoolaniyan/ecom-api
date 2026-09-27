@@ -1,0 +1,14 @@
+{{- if .Values.monitoring.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "ecom-api.fullname" . }}
+  labels:
+    {{- include "ecom-api.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # Same rule file Docker Compose loads into Prometheus.
+  {{- .Files.Get "files/prometheus-rules.yaml" | fromYaml | toYaml | nindent 2 }}
+{{- end }}

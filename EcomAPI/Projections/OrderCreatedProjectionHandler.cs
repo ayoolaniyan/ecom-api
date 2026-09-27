@@ -3,7 +3,7 @@ using EcomAPI.Caching;
 using EcomAPI.Data;
 using EcomAPI.Events;
 using EcomAPI.Models;
-using EcomAPI.Tracing;
+using EcomAPI.Observability;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Hybrid;
@@ -46,6 +46,9 @@ namespace EcomAPI.Projections
 
                 await _context.Orders.AddAsync(order, cancellationToken);
                 await _context.SaveChangesAsync(cancellationToken);
+
+                // Eventual-consistency delay: from the POST's write to the order being readable.
+                AppMetrics.OrderProjected(notification.CreatedAt);
             }
 
             // Also runs on a redelivery, in case a previous attempt stopped before invalidating.

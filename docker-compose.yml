@@ -49,14 +49,93 @@ services:
       retries: 5
     restart: unless-stopped
 
-  jaeger:
-    # Tracing backend: OTLP receiver + UI, traces kept in memory (lost on restart)
-    image: jaegertracing/jaeger:2.21.0
-    container_name: ecom-jaeger
+  # ---- Observability: the API → OpenTelemetry Collector → Tempo / Prometheus / Loki → Grafana ----
+
+  otel-collector:
+    # Single OTLP endpoint for traces, metrics and logs; routes each signal to its backend
+    image: otel/opentelemetry-collector-contrib:0.161.0
+    container_name: ecom-otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
     ports:
-      - "16686:16686"   # UI
-      - "4317:4317"     # OTLP/gRPC (host access for `dotnet run` with Tracing__Enabled=true)
+      - "4317:4317"     # OTLP/gRPC (host access for `dotnet run` with Telemetry__*__Enabled=true)
       - "4318:4318"     # OTLP/HTTP
+    volumes:
+      - ./deploy/observability/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    depends_on:
+      - tempo
+      - loki
+    restart: unless-stopped
+
+  tempo:
+    # Trace storage; also derives span metrics and the service graph into Prometheus
+    image: grafana/tempo:3.0.3
+    container_name: ecom-tempo
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    volumes:
+      - ./deploy/observability/tempo/config.yaml:/etc/tempo/config.yaml:ro
+      - tempo-data:/var/tempo
+    restart: unless-stopped
+
+  loki:
+    # Log storage; receives OTLP logs from the collector
+    image: grafana/loki:3.7.8
+    container_name: ecom-loki
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./deploy/observability/loki/config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+
+  prometheus:
+    # Metrics storage and alert rules (shared with the Helm chart's PrometheusRule)
+    image: prom/prometheus:v3.15.0
+    container_name: ecom-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-remote-write-receiver   # span metrics from Tempo
+      - --enable-feature=exemplar-storage    # trace ids on latency histograms
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Directory mounts (not single files) so edits on the host are picked up
+      - ./deploy/helm/ecom-api/files:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  kafka-exporter:
+    # Consumer group lag and topic offsets for Prometheus
+    image: danielqsj/kafka-exporter:v1.10.0
+    container_name: ecom-kafka-exporter
+    command: ["--kafka.server=kafka:9092"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  grafana:
+    # Dashboards and exploration; data sources and the eComAPI dashboard are provisioned
+    image: grafana/grafana:13.2.2
+    container_name: ecom-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # Local development only: open access as Admin, no login
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/helm/ecom-api/files:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
     restart: unless-stopped
 
   ecomapi:
@@ -75,8 +154,10 @@ services:
       Kafka__BootstrapServers: kafka:9092
       Cache__Provider: Redis
       Cache__RedisConnection: redis:6379
-      Tracing__Enabled: "true"
-      Tracing__OtlpEndpoint: http://jaeger:4317
+      Telemetry__OtlpEndpoint: http://otel-collector:4317
+      Telemetry__Tracing__Enabled: "true"
+      Telemetry__Metrics__Enabled: "true"
+      Telemetry__Logs__Enabled: "true"
     volumes:
       - ecom-data:/app/data
     depends_on:
@@ -84,7 +165,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      jaeger:
+      otel-collector:
         condition: service_started
     restart: unless-stopped
 
@@ -92,3 +173,7 @@ volumes:
   ecom-data:
   kafka-data:
   redis-data:
+  tempo-data:
+  loki-data:
+  prometheus-data:
+  grafana-data:

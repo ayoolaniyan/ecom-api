@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using MediatR;
 
-namespace EcomAPI.Tracing
+namespace EcomAPI.Observability
 {
     // Wraps every MediatR command/query in a span named after the request type, so handlers
     // show up in traces and can tag it (e.g. cache hit/miss) through Activity.Current.

@@ -28,11 +28,14 @@ data:
   Cache__OrderTtlSeconds: {{ .Values.api.config.cache.orderTtlSeconds | quote }}
   Cache__SummariesTtlSeconds: {{ .Values.api.config.cache.summariesTtlSeconds | quote }}
   Cache__LocalTtlSeconds: {{ .Values.api.config.cache.localTtlSeconds | quote }}
-  {{- if .Values.tracing.enabled }}
-  Tracing__Enabled: "true"
-  Tracing__OtlpEndpoint: {{ required "tracing.otlpEndpoint is required when tracing.enabled is true" .Values.tracing.otlpEndpoint | quote }}
-  Tracing__ServiceName: {{ .Values.tracing.serviceName | quote }}
-  Tracing__SamplingRatio: {{ .Values.tracing.samplingRatio | quote }}
-  {{- else }}
-  Tracing__Enabled: "false"
+  {{- with .Values.telemetry }}
+  {{- if or .tracing.enabled .metrics.enabled .logs.enabled }}
+  Telemetry__OtlpEndpoint: {{ required "telemetry.otlpEndpoint is required when a telemetry signal is enabled" .otlpEndpoint | quote }}
+  Telemetry__ServiceName: {{ .serviceName | quote }}
+  {{- end }}
+  Telemetry__Tracing__Enabled: {{ .tracing.enabled | quote }}
+  Telemetry__Tracing__SamplingRatio: {{ .tracing.samplingRatio | quote }}
+  Telemetry__Metrics__Enabled: {{ .metrics.enabled | quote }}
+  Telemetry__Metrics__ExportIntervalMs: {{ .metrics.exportIntervalMs | quote }}
+  Telemetry__Logs__Enabled: {{ .logs.enabled | quote }}
   {{- end }}

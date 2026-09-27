@@ -2,6 +2,7 @@ using EcomAPI.Data;
 using EcomAPI.Events;
 using EcomAPI.Handlers;
 using EcomAPI.Models;
+using EcomAPI.Observability;
 using EcomAPI.Outbox;
 using FluentValidation;
 using MediatR;
@@ -56,6 +57,7 @@ public class CreateOrderCommandHandler : IRequestHandler<CreateOrderCommand, Ord
         await _context.SaveChangesAsync(cancellationToken);
 
         await transaction.CommitAsync(cancellationToken);
+        AppMetrics.OrderCreated();
 
         return new OrderDto(
             order.Id,

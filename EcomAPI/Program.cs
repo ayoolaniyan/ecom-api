@@ -6,7 +6,7 @@ using EcomAPI.Handlers;
 using EcomAPI.Health;
 using EcomAPI.Outbox;
 using EcomAPI.Projections;
-using EcomAPI.Tracing;
+using EcomAPI.Observability;
 using FluentValidation;
 using MediatR;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -15,8 +15,6 @@ using Microsoft.Extensions.Caching.Hybrid;
 using Microsoft.Extensions.Caching.StackExchangeRedis;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using OpenTelemetry.Instrumentation.StackExchangeRedis;
-using OpenTelemetry.Resources;
-using OpenTelemetry.Trace;
 using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -108,30 +106,8 @@ builder.Services.AddMediatR(cfg =>
     cfg.AddOpenBehavior(typeof(TracingBehavior<,>));
 });
 
-// Tracing:Enabled exports traces over OTLP. The trace of a POST continues through the outbox
-// dispatcher, Kafka and the projection (see Tracing/Telemetry.cs).
-var tracingSection = builder.Configuration.GetSection(TracingOptions.SectionName);
-var tracingOptions = tracingSection.Get<TracingOptions>() ?? new TracingOptions();
-if (tracingOptions.Enabled)
-{
-    builder.Services.AddOpenTelemetry()
-        .ConfigureResource(resource => resource
-            .AddService(tracingOptions.ServiceName, serviceVersion: typeof(Program).Assembly.GetName().Version?.ToString())
-            .AddAttributes([new("deployment.environment.name", builder.Environment.EnvironmentName)]))
-        .WithTracing(tracing =>
-        {
-            tracing
-                .SetSampler(new ParentBasedSampler(new TraceIdRatioBasedSampler(tracingOptions.SamplingRatio)))
-                .AddSource(Telemetry.SourceName)
-                // Probes hit the health endpoints every few seconds; don't trace them or their dependency checks.
-                .AddAspNetCoreInstrumentation(opt => opt.Filter = ctx => !ctx.Request.Path.StartsWithSegments("/healthz"))
-                .AddEntityFrameworkCoreInstrumentation()
-                .AddOtlpExporter(opt => opt.Endpoint = new Uri(tracingOptions.OtlpEndpoint));
-
-            if (cacheOptions.Provider.Equals("Redis", StringComparison.OrdinalIgnoreCase))
-                tracing.AddRedisInstrumentation();
-        });
-}
+// Telemetry:{Tracing,Metrics,Logs}:Enabled export each signal over OTLP (see Observability/).
+builder.AddObservability(redisCache: cacheOptions.Provider.Equals("Redis", StringComparison.OrdinalIgnoreCase));
 
 var app = builder.Build();
 
@@ -143,12 +119,14 @@ using (var scope = app.Services.CreateScope())
 }
 
 // Liveness only proves the process is serving requests; readiness also checks the dependencies.
-app.MapHealthChecks("/healthz/live", new HealthCheckOptions { Predicate = _ => false });
+// Probe traffic is kept out of the HTTP metrics, as it is out of the traces.
+app.MapHealthChecks("/healthz/live", new HealthCheckOptions { Predicate = _ => false })
+    .DisableHttpMetrics();
 app.MapHealthChecks("/healthz/ready", new HealthCheckOptions
 {
     Predicate = check => check.Tags.Contains("ready"),
     ResponseWriter = HealthCheckResponseWriter.WriteAsync
-});
+}).DisableHttpMetrics();
 
 app.MapPost("/api/orders", async (IMediator mediator, CreateOrderCommand command) =>
 {
