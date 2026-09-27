@@ -32,6 +32,23 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    container_name: ecom-redis
+    ports:
+      # Host access for local development (`dotnet run` with Cache__Provider=Redis)
+      - "6379:6379"
+    # Append-only file so cached entries survive a restart; bounded memory with LRU eviction
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   ecomapi:
     build:
       context: ./EcomAPI
@@ -46,13 +63,18 @@ services:
       ConnectionStrings__ReadDbConnection: "Data Source=/app/data/Read.db"
       EventBus__Provider: Kafka
       Kafka__BootstrapServers: kafka:9092
+      Cache__Provider: Redis
+      Cache__RedisConnection: redis:6379
     volumes:
       - ecom-data:/app/data
     depends_on:
       kafka:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
 
 volumes:
   ecom-data:
   kafka-data:
+  redis-data:
