@@ -1,7 +1,10 @@
+using System.Diagnostics;
 using EcomAPI.Data;
 using EcomAPI.Events;
+using EcomAPI.Tracing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using OpenTelemetry;
 
 namespace EcomAPI.Outbox
 {
@@ -51,17 +54,28 @@ namespace EcomAPI.Outbox
             using var scope = _scopeFactory.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<WriteDbContext>();
 
-            var messages = await context.OutboxMessages
-                .Where(m => m.ProcessedAt == null)
-                .OrderBy(m => m.Id)
-                .Take(_options.BatchSize)
-                .ToListAsync(stoppingToken);
+            // Polling runs every second; keep its queries out of the traces.
+            List<OutboxMessage> messages;
+            using (SuppressInstrumentationScope.Begin())
+            {
+                messages = await context.OutboxMessages
+                    .Where(m => m.ProcessedAt == null)
+                    .OrderBy(m => m.Id)
+                    .Take(_options.BatchSize)
+                    .ToListAsync(stoppingToken);
+            }
 
             if (messages.Count == 0)
                 return;
 
             foreach (var message in messages)
             {
+                // Continues the trace of the request that wrote the message.
+                using var activity = Telemetry.StartActivityFromStoredContext("outbox dispatch", ActivityKind.Internal, message.TraceParent, message.TraceState);
+                activity?.SetTag("outbox.message_id", message.Id);
+                activity?.SetTag("outbox.event_type", message.Type);
+                activity?.SetTag("outbox.attempt", message.Attempts + 1);
+
                 try
                 {
                     await _publisher.PublishAsync(message, stoppingToken);
@@ -70,6 +84,7 @@ namespace EcomAPI.Outbox
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
+                    activity.RecordException(ex);
                     message.Attempts++;
                     message.Error = ex.Message;
                     _logger.LogWarning(ex, "Failed to publish outbox message {MessageId} (attempt {Attempts})", message.Id, message.Attempts);
@@ -79,7 +94,10 @@ namespace EcomAPI.Outbox
                 }
             }
 
-            await context.SaveChangesAsync(CancellationToken.None);
+            using (SuppressInstrumentationScope.Begin())
+            {
+                await context.SaveChangesAsync(CancellationToken.None);
+            }
         }
     }
 }

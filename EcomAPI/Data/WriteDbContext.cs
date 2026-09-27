@@ -18,6 +18,7 @@ namespace EcomAPI.Data
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             modelBuilder.Entity<OutboxMessage>().HasIndex(m => m.ProcessedAt);
+            modelBuilder.Entity<OutboxMessage>().Property(m => m.TraceParent).HasMaxLength(55);
         }
         
     }

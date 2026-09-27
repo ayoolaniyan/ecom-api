@@ -28,3 +28,11 @@ data:
   Cache__OrderTtlSeconds: {{ .Values.api.config.cache.orderTtlSeconds | quote }}
   Cache__SummariesTtlSeconds: {{ .Values.api.config.cache.summariesTtlSeconds | quote }}
   Cache__LocalTtlSeconds: {{ .Values.api.config.cache.localTtlSeconds | quote }}
+  {{- if .Values.tracing.enabled }}
+  Tracing__Enabled: "true"
+  Tracing__OtlpEndpoint: {{ required "tracing.otlpEndpoint is required when tracing.enabled is true" .Values.tracing.otlpEndpoint | quote }}
+  Tracing__ServiceName: {{ .Values.tracing.serviceName | quote }}
+  Tracing__SamplingRatio: {{ .Values.tracing.samplingRatio | quote }}
+  {{- else }}
+  Tracing__Enabled: "false"
+  {{- end }}

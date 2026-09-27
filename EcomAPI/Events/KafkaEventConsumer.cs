@@ -1,8 +1,11 @@
+using System.Diagnostics;
 using System.Text;
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
+using EcomAPI.Tracing;
 using MediatR;
 using Microsoft.Extensions.Options;
+using OpenTelemetry;
 
 namespace EcomAPI.Events
 {
@@ -72,6 +75,21 @@ namespace EcomAPI.Events
 
         private async Task HandleAsync(IConsumer<string, string> consumer, ConsumeResult<string, string> result, CancellationToken stoppingToken)
         {
+            // Continue the trace started by the request that raised the event (via the outbox and producer).
+            var parent = Telemetry.Extract(result.Message.Headers);
+            Baggage.Current = parent.Baggage;
+            using var activity = Telemetry.Source.StartActivity($"process {result.Topic}", ActivityKind.Consumer, parent.ActivityContext);
+            activity?.SetTag("messaging.system", "kafka");
+            activity?.SetTag("messaging.operation.type", "process");
+            activity?.SetTag("messaging.operation.name", "process");
+            activity?.SetTag("messaging.destination.name", result.Topic);
+            activity?.SetTag("messaging.destination.partition.id", result.Partition.Value.ToString());
+            activity?.SetTag("messaging.kafka.offset", result.Offset.Value);
+            activity?.SetTag("messaging.kafka.message.key", result.Message.Key);
+            activity?.SetTag("messaging.consumer.group.name", _options.ConsumerGroupId);
+            if (result.Message.Headers.TryGetLastBytes(KafkaEventPublisher.MessageIdHeader, out var messageId))
+                activity?.SetTag("messaging.message.id", Encoding.UTF8.GetString(messageId));
+
             var eventType = result.Message.Headers.TryGetLastBytes(KafkaEventPublisher.EventTypeHeader, out var bytes)
                 ? Encoding.UTF8.GetString(bytes)
                 : null;
@@ -84,12 +102,15 @@ namespace EcomAPI.Events
             }
             catch (System.Text.Json.JsonException ex)
             {
+                activity.RecordException(ex);
                 _logger.LogError(ex, "Malformed {EventType} payload at {TopicPartitionOffset}", eventType, result.TopicPartitionOffset);
             }
 
             if (evt is null)
             {
                 // Retrying will never succeed, so skip rather than block the partition.
+                activity?.SetStatus(ActivityStatusCode.Error, "Unknown or malformed event; skipped");
+                activity?.SetTag("messaging.message.skipped", true);
                 _logger.LogWarning("Skipping message at {TopicPartitionOffset} with event type {EventType}", result.TopicPartitionOffset, eventType);
                 consumer.Commit(result);
                 return;
@@ -107,9 +128,12 @@ namespace EcomAPI.Events
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // Rewind so the same message is delivered again on the next Consume().
+                activity.RecordException(ex);
+                activity?.SetTag("messaging.message.retried", true);
                 _logger.LogError(ex, "Failed to handle {EventType} from {TopicPartitionOffset}; retrying in {Delay}",
                     eventType, result.TopicPartitionOffset, RetryDelay);
                 consumer.Seek(result.TopicPartitionOffset);
+                activity?.Stop(); // Keep the back-off out of the span's duration.
                 await Task.Delay(RetryDelay, stoppingToken);
             }
         }

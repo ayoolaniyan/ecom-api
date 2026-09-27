@@ -16,6 +16,7 @@ projecting optimized **read models**.
 -   Event‑driven design
 -   Kafka event streaming with a transactional outbox
 -   Redis distributed caching of read queries (HybridCache)
+-   Distributed tracing with OpenTelemetry, across the outbox and Kafka
 -   Separate read and write databases
 -   Event projections
 -   Clean architecture principles
@@ -174,6 +175,7 @@ model shortly after the `POST` returns (typically within about a second).
     ├── Projections
     ├── Outbox
     ├── Caching
+    ├── Tracing
     ├── Health
     ├── Models
     ├── DTOs
@@ -216,6 +218,11 @@ model shortly after the `POST` returns (typically within about a second).
 
 -   Redis
 -   HybridCache (`Microsoft.Extensions.Caching.Hybrid`)
+
+## Observability
+
+-   OpenTelemetry (.NET SDK, OTLP exporter)
+-   Jaeger
 
 ## Messaging
 
@@ -274,12 +281,25 @@ Cache__Provider=Redis dotnet run
 
 Redis is reachable from the host at `localhost:6379`.
 
+Tracing is off by default (`Tracing:Enabled = false`). To send traces
+to Jaeger from a local run:
+
+``` bash
+docker compose up -d jaeger
+cd EcomAPI
+Tracing__Enabled=true dotnet run
+```
+
+Traces are exported to `localhost:4317` and shown at
+`http://localhost:16686`.
+
 ------------------------------------------------------------------------
 
 # Running with Docker
 
 The API ships with a multi-stage `Dockerfile` and a `docker-compose.yml`
-that runs the API together with a single-node Kafka broker and Redis.
+that runs the API together with a single-node Kafka broker, Redis and
+Jaeger.
 SQLite databases are stored on a named volume (`ecom-data`), Kafka data on
 `kafka-data` and Redis data on `redis-data`, so all survive container
 restarts.
@@ -290,7 +310,8 @@ restarts.
 docker compose up --build -d
 ```
 
-The API is available at `http://localhost:5025`. It waits for the Kafka
+The API is available at `http://localhost:5025` and the Jaeger UI at
+`http://localhost:16686`. It waits for the Kafka
 and Redis healthchecks before starting. On first start the schema is created in the
 empty volume via EF Core migrations, and the `orders.order-created` topic
 is created by the API.
@@ -315,7 +336,7 @@ curl http://localhost:5025/api/orders
 ``` bash
 docker compose logs -f        # follow logs
 docker compose down           # stop (data is kept)
-docker compose down -v        # stop and delete the database, Kafka and Redis volumes
+docker compose down -v        # stop and delete the database, Kafka and Redis volumes (Jaeger keeps traces in memory only)
 ```
 
 ## Inspecting events
@@ -352,6 +373,10 @@ docker exec ecom-kafka /opt/kafka/bin/kafka-consumer-groups.sh \
 | `Cache__OrderTtlSeconds` | `300` |
 | `Cache__SummariesTtlSeconds` | `30` |
 | `Cache__LocalTtlSeconds` | `10` |
+| `Tracing__Enabled` | `true` (`false` outside Docker) |
+| `Tracing__OtlpEndpoint` | `http://jaeger:4317` (`http://localhost:4317` outside Docker) |
+| `Tracing__ServiceName` | `ecomapi` |
+| `Tracing__SamplingRatio` | `1.0` |
 
 The container listens on port `8080` and runs as a non-root user.
 
@@ -437,6 +462,88 @@ docker exec ecom-redis redis-cli TTL ecomapi:orders:summaries
 # Clear the cache
 docker exec ecom-redis redis-cli FLUSHALL
 ```
+
+------------------------------------------------------------------------
+
+# Distributed Tracing
+
+The API is instrumented with **OpenTelemetry** and exports traces over
+OTLP/gRPC. With Docker Compose they go to **Jaeger**. Any OTLP backend
+works (OpenTelemetry Collector, Grafana Tempo, a vendor) by changing
+`Tracing:OtlpEndpoint`.
+
+A `POST /api/orders` produces **one trace**, even though the event is
+published and projected after the response has been sent:
+
+``` mermaid
+flowchart TD
+    HTTP["POST /api/orders<br/>(ASP.NET Core)"]
+    Cmd["CreateOrderCommand<br/>(MediatR)"]
+    Insert["INSERT Orders + OutboxMessages<br/>(EF Core)"]
+    Dispatch["outbox dispatch"]
+    Send["send orders.order-created<br/>(Kafka producer)"]
+    Process["process orders.order-created<br/>(Kafka consumer)"]
+    Project["project OrderCreatedEvent"]
+    ReadDB["SELECT / INSERT read model<br/>(EF Core)"]
+    Redis["UNLINK cache keys<br/>(Redis)"]
+
+    HTTP --> Cmd --> Insert
+    Cmd -.->|traceparent stored<br/>on the outbox row| Dispatch
+    Dispatch --> Send
+    Send -.->|traceparent in<br/>Kafka headers| Process
+    Process --> Project
+    Project --> ReadDB
+    Project --> Redis
+```
+
+-   **Automatic spans.** ASP.NET Core requests, EF Core commands (write
+    and read databases) and Redis commands (when `Cache:Provider = Redis`)
+    are instrumented by the OpenTelemetry libraries.
+-   **Across the outbox.** `OutboxMessage.Create` stores the current W3C
+    `traceparent`/`tracestate` on the outbox row. `OutboxDispatcher`
+    starts its `outbox dispatch` span from it, so publishing continues the
+    request's trace. A failed publish is recorded on its span, and each
+    retry appears in the same trace.
+-   **Across Kafka.** `KafkaEventPublisher` creates a producer span and
+    injects its context into the message headers (`traceparent`, next to
+    `event-type` and `message-id`). `KafkaEventConsumer` extracts it and
+    starts a consumer span, tagged with the partition, offset and key.
+    Skipped and retried messages are marked on the span. In `InProcess`
+    mode the dispatcher calls the projection directly, inside the same
+    trace.
+-   **Commands and queries.** A MediatR pipeline behavior
+    (`TracingBehavior`) wraps each request in a span named after it
+    (`CreateOrderCommand`, `GetOrderByIdQuery`, ...). Query spans carry a
+    `cache.hit` tag, so you can tell cached reads from database reads.
+-   **Noise.** `/healthz/*` requests (and the checks they run) and the
+    outbox dispatcher's once-a-second polling queries are not traced.
+-   **Logs.** Every log entry includes the `TraceId` and `SpanId` of the
+    span it was written in, so a log line can be looked up in Jaeger.
+-   **Sampling.** `Tracing:SamplingRatio` samples new traces. Spans that
+    continue a trace (from a caller's `traceparent`, an outbox row or a
+    Kafka message) follow the decision already made.
+
+With `Tracing:Enabled = false` (the default outside Docker), nothing is
+exported and no collector is needed.
+
+## Viewing traces
+
+1.  Create an order (see [Try it out](#try-it-out)).
+2.  Open `http://localhost:16686`, pick the service `ecomapi` and click
+    **Find Traces**.
+3.  Open the `POST /api/orders` trace. Its spans run from the HTTP request
+    through the outbox and Kafka to the projection and the cache
+    invalidation.
+
+To trace a log line, copy the `TraceId` from the log entry and paste it
+into Jaeger's search box.
+
+``` bash
+docker compose logs ecomapi | grep TraceId
+```
+
+Jaeger keeps traces in memory, so they are lost when its container
+restarts.
 
 ------------------------------------------------------------------------
 
@@ -563,9 +670,14 @@ Useful values (see `values.yaml` for all of them):
 | `kafka.topic.*` | 3 partitions, RF 3 | Events topic |
 | `kafka.enabled` / `kafka.externalBootstrapServers` | `true` / empty | Use an existing Kafka instead of Strimzi |
 | `redis.enabled` / `redis.externalConnection` | `true` / empty | Use an existing Redis (stored in a Secret) |
+| `tracing.enabled` / `tracing.otlpEndpoint` | `false` / empty | Export traces to an existing OTLP/gRPC collector |
+| `tracing.samplingRatio` | `1.0` | Fraction of new traces recorded |
 
 With both Kafka options off, the API falls back to the in-process event
-bus. With both Redis options off, it uses the in-memory cache only.
+bus. With both Redis options off, it uses the in-memory cache only. The
+chart doesn't deploy a tracing backend. Point `tracing.otlpEndpoint` at
+one that runs in or outside the cluster, e.g.
+`--set tracing.enabled=true --set tracing.otlpEndpoint=http://otel-collector.observability:4317`.
 
 ## Limitations
 
@@ -605,5 +717,5 @@ Future improvements may include:
 -   ~~Kafka or RabbitMQ event streaming~~ ✅ (see [Event Streaming with Kafka](#event-streaming-with-kafka))
 -   ~~Redis distributed caching~~ ✅ (see [Distributed Caching with Redis](#distributed-caching-with-redis))
 -   ~~Kubernetes deployment~~ ✅ (see [Deploying to Kubernetes](#deploying-to-kubernetes))
--   distributed tracing
+-   ~~distributed tracing~~ ✅ (see [Distributed Tracing](#distributed-tracing))
 -   observability stack

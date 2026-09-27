@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using EcomAPI.Outbox;
+using EcomAPI.Tracing;
 using MediatR;
 
 namespace EcomAPI.Events
@@ -18,9 +20,15 @@ namespace EcomAPI.Events
 
         public async Task PublishAsync(OutboxMessage message, CancellationToken cancellationToken = default)
         {
+            using var activity = Telemetry.Source.StartActivity($"process {message.Type}", ActivityKind.Consumer);
+            activity?.SetTag("messaging.system", "in-process");
+            activity?.SetTag("messaging.operation.type", "process");
+            activity?.SetTag("messaging.message.id", message.Id.ToString());
+
             var evt = EventSerializer.Deserialize(message.Type, message.Payload);
             if (evt is null)
             {
+                activity?.SetStatus(ActivityStatusCode.Error, "Unknown event type; skipped");
                 _logger.LogWarning("Skipping outbox message {MessageId}: unknown event type {EventType}", message.Id, message.Type);
                 return;
             }

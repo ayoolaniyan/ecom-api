@@ -49,6 +49,16 @@ services:
       retries: 5
     restart: unless-stopped
 
+  jaeger:
+    # Tracing backend: OTLP receiver + UI, traces kept in memory (lost on restart)
+    image: jaegertracing/jaeger:2.21.0
+    container_name: ecom-jaeger
+    ports:
+      - "16686:16686"   # UI
+      - "4317:4317"     # OTLP/gRPC (host access for `dotnet run` with Tracing__Enabled=true)
+      - "4318:4318"     # OTLP/HTTP
+    restart: unless-stopped
+
   ecomapi:
     build:
       context: ./EcomAPI
@@ -65,6 +75,8 @@ services:
       Kafka__BootstrapServers: kafka:9092
       Cache__Provider: Redis
       Cache__RedisConnection: redis:6379
+      Tracing__Enabled: "true"
+      Tracing__OtlpEndpoint: http://jaeger:4317
     volumes:
       - ecom-data:/app/data
     depends_on:
@@ -72,6 +84,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      jaeger:
+        condition: service_started
     restart: unless-stopped
 
 volumes:

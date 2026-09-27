@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using EcomAPI.Events;
 
 namespace EcomAPI.Outbox
@@ -22,16 +23,25 @@ namespace EcomAPI.Outbox
 
         public string? Error { get; set; }
 
+        // W3C trace context of the request that raised the event, so dispatch and consumption
+        // continue the same trace after the request has returned.
+        public string? TraceParent { get; set; }
+
+        public string? TraceState { get; set; }
+
         public static OutboxMessage Create<TEvent>(TEvent evt, string key) where TEvent : notnull
         {
             var (type, payload) = EventSerializer.Serialize(evt);
+            var activity = Activity.Current;
 
             return new OutboxMessage
             {
                 Type = type,
                 Key = key,
                 Payload = payload,
-                OccurredAt = DateTime.UtcNow
+                OccurredAt = DateTime.UtcNow,
+                TraceParent = activity?.Id,
+                TraceState = activity?.TraceStateString
             };
         }
     }
