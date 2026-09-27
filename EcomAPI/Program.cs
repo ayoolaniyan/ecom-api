@@ -1,3 +1,4 @@
+using EcomAPI.Caching;
 using EcomAPI.Commands;
 using EcomAPI.Data;
 using EcomAPI.Events;
@@ -7,6 +8,8 @@ using EcomAPI.Projections;
 using FluentValidation;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Hybrid;
+using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -34,6 +37,34 @@ else
     builder.Services.AddSingleton<IEventPublisher, InProcessEventPublisher>();
 }
 builder.Services.AddHostedService<OutboxDispatcher>();
+
+// Cache:Provider selects the HybridCache L2: "Redis" (shared across instances) or "Memory" (in-process L1 only).
+var cacheSection = builder.Configuration.GetSection(CacheOptions.SectionName);
+builder.Services.Configure<CacheOptions>(cacheSection);
+var cacheOptions = cacheSection.Get<CacheOptions>() ?? new CacheOptions();
+if (cacheOptions.Provider.Equals("Redis", StringComparison.OrdinalIgnoreCase))
+{
+    // HybridCache picks up the registered IDistributedCache as its L2.
+    builder.Services.AddStackExchangeRedisCache(opt =>
+    {
+        var redis = ConfigurationOptions.Parse(cacheOptions.RedisConnection);
+        // Start and keep serving from the database if Redis is unreachable; fail fast instead of blocking requests.
+        redis.AbortOnConnectFail = false;
+        redis.ConnectTimeout = 2000;
+        redis.AsyncTimeout = 1000;
+        redis.SyncTimeout = 1000;
+        opt.ConfigurationOptions = redis;
+        opt.InstanceName = cacheOptions.InstanceName;
+    });
+}
+builder.Services.AddHybridCache(opt =>
+{
+    opt.DefaultEntryOptions = new HybridCacheEntryOptions
+    {
+        Expiration = TimeSpan.FromSeconds(cacheOptions.OrderTtlSeconds),
+        LocalCacheExpiration = TimeSpan.FromSeconds(cacheOptions.LocalTtlSeconds)
+    };
+});
 // builder.Services.AddScoped<IEventHandler<OrderCreatedEvent>, OrderCreatedProjectionHandler>();
 
 builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof(Program).Assembly));

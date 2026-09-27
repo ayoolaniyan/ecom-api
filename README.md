@@ -15,6 +15,7 @@ projecting optimized **read models**.
 -   CQRS architecture
 -   Event‑driven design
 -   Kafka event streaming with a transactional outbox
+-   Redis distributed caching of read queries (HybridCache)
 -   Separate read and write databases
 -   Event projections
 -   Clean architecture principles
@@ -35,6 +36,7 @@ flowchart LR
     API[ASP.NET Core API]
     Commands[Command Handlers]
     Queries[Query Handlers]
+    Cache[(HybridCache<br/>memory L1 + Redis L2)]
     WriteDB[(Write Database<br/>Orders + Outbox)]
     Dispatcher[Outbox Dispatcher]
     Kafka[(Kafka topic<br/>orders.order-created)]
@@ -54,7 +56,9 @@ flowchart LR
     Consumer --> Projections
     Projections --> ReadDB
 
-    Queries --> ReadDB
+    Queries --> Cache
+    Cache -->|miss| ReadDB
+    Projections -.->|invalidate| Cache
 ```
 
 ### Architecture Highlights
@@ -63,7 +67,7 @@ flowchart LR
 -   **Events** are stored in an outbox in the same transaction as the write,
     then streamed through **Kafka**
 -   **Projections** update read models
--   **Queries** read optimized data models
+-   **Queries** read optimized data models, cached in **Redis**
 
 This separation improves:
 
@@ -88,6 +92,7 @@ sequenceDiagram
     participant Consumer as KafkaEventConsumer
     participant Projection
     participant ReadDB
+    participant Cache as HybridCache (Redis)
 
     Client->>API: Create Order Request
     API->>CommandHandler: Execute Command
@@ -100,10 +105,15 @@ sequenceDiagram
     Kafka->>Consumer: Deliver event
     Consumer->>Projection: Trigger Projection
     Projection->>ReadDB: Update Read Model (idempotent)
+    Projection->>Cache: Invalidate order + summaries
     Consumer->>Kafka: Commit offset
-    Client->>API: Query Products
-    API->>ReadDB: Fetch Data
-    ReadDB-->>Client: Return Product List
+    Client->>API: Query Orders
+    API->>Cache: Get (memory, then Redis)
+    alt cache miss
+        API->>ReadDB: Fetch Data
+        API->>Cache: Store with TTL
+    end
+    API-->>Client: Return Order List
 ```
 
 ------------------------------------------------------------------------
@@ -163,6 +173,7 @@ model shortly after the `POST` returns (typically within about a second).
     ├── Handlers
     ├── Projections
     ├── Outbox
+    ├── Caching
     ├── Models
     ├── DTOs
     ├── Data
@@ -195,6 +206,11 @@ model shortly after the `POST` returns (typically within about a second).
 
 -   SQLite
 -   Entity Framework Core
+
+## Caching
+
+-   Redis
+-   HybridCache (`Microsoft.Extensions.Caching.Hybrid`)
 
 ## Messaging
 
@@ -239,14 +255,26 @@ EventBus__Provider=Kafka dotnet run
 
 The broker is reachable from the host at `localhost:9094`.
 
+Likewise, `Cache:Provider = Memory` by default, so queries are cached
+in-process only. To use Redis locally:
+
+``` bash
+docker compose up -d redis
+cd EcomAPI
+Cache__Provider=Redis dotnet run
+```
+
+Redis is reachable from the host at `localhost:6379`.
+
 ------------------------------------------------------------------------
 
 # Running with Docker
 
 The API ships with a multi-stage `Dockerfile` and a `docker-compose.yml`
-that runs the API together with a single-node Kafka broker. SQLite
-databases are stored on a named volume (`ecom-data`) and Kafka data on
-`kafka-data`, so both survive container restarts.
+that runs the API together with a single-node Kafka broker and Redis.
+SQLite databases are stored on a named volume (`ecom-data`), Kafka data on
+`kafka-data` and Redis data on `redis-data`, so all survive container
+restarts.
 
 ## Start the container
 
@@ -255,7 +283,7 @@ docker compose up --build -d
 ```
 
 The API is available at `http://localhost:5025`. It waits for the Kafka
-healthcheck before starting. On first start the schema is created in the
+and Redis healthchecks before starting. On first start the schema is created in the
 empty volume via EF Core migrations, and the `orders.order-created` topic
 is created by the API.
 
@@ -279,7 +307,7 @@ curl http://localhost:5025/api/orders
 ``` bash
 docker compose logs -f        # follow logs
 docker compose down           # stop (data is kept)
-docker compose down -v        # stop and delete the database and Kafka volumes
+docker compose down -v        # stop and delete the database, Kafka and Redis volumes
 ```
 
 ## Inspecting events
@@ -310,6 +338,12 @@ docker exec ecom-kafka /opt/kafka/bin/kafka-consumer-groups.sh \
 | `Kafka__TopicReplicationFactor` | `1` |
 | `Outbox__PollingIntervalMs` | `1000` |
 | `Outbox__BatchSize` | `50` |
+| `Cache__Provider` | `Redis` (`Memory` outside Docker) |
+| `Cache__RedisConnection` | `redis:6379` (`localhost:6379` outside Docker) |
+| `Cache__InstanceName` | `ecomapi:` (Redis key prefix) |
+| `Cache__OrderTtlSeconds` | `300` |
+| `Cache__SummariesTtlSeconds` | `30` |
+| `Cache__LocalTtlSeconds` | `10` |
 
 The container listens on port `8080` and runs as a non-root user.
 
@@ -346,6 +380,58 @@ would need row locking or leader election on the outbox.
 
 ------------------------------------------------------------------------
 
+# Distributed Caching with Redis
+
+Read queries are cached with .NET's **HybridCache**, a two-level cache:
+
+-   **L1** is an in-memory cache inside each API instance.
+-   **L2** is **Redis**, shared by all instances (`Cache:Provider = Redis`).
+    With `Memory`, only L1 is used and no Redis is needed.
+
+A lookup checks L1, then Redis, then the read database, and stores the
+result in both levels. Concurrent misses for the same key are collapsed
+into a single database query (stampede protection).
+
+| Key | Query | TTL (Redis / memory) |
+|-----|-------|----------------------|
+| `order:{id}` | `GET /api/orders/{id}` | 300s / 10s |
+| `orders:summaries` | `GET /api/orders` | 30s / 10s |
+
+Keys are stored in Redis with the `ecomapi:` prefix.
+
+-   **Invalidation.** When `OrderCreatedProjectionHandler` projects an
+    order, it removes `orders:summaries` and `order:{id}` from the cache,
+    so the list shows the new order right away. It also does this on a
+    redelivered event, in case an earlier attempt stopped before
+    invalidating.
+-   **Not-found results are not cached.** Reads are eventually
+    consistent, so an order that is not projected yet must show up as soon
+    as it is.
+-   **Multiple instances.** Removing a key clears Redis for everyone, but
+    only the local memory copy of the instance doing the removal. Other
+    instances can serve their memory copy for up to `LocalTtlSeconds`
+    (10s), so this is kept short.
+-   **Redis outages.** If Redis is unreachable, HybridCache logs the
+    failure and falls back to memory and the read database; requests keep
+    working, only slower (up to about 1–2s on a memory miss because of the
+    Redis timeout). An invalidation that fails during an outage is logged,
+    and the stale entry expires on its TTL.
+
+## Inspecting the cache
+
+``` bash
+# List cached keys
+docker exec ecom-redis redis-cli --scan --pattern 'ecomapi:*'
+
+# Remaining lifetime of an entry (seconds)
+docker exec ecom-redis redis-cli TTL ecomapi:orders:summaries
+
+# Clear the cache
+docker exec ecom-redis redis-cli FLUSHALL
+```
+
+------------------------------------------------------------------------
+
 # Learning Goals
 
 This project demonstrates:
@@ -364,7 +450,7 @@ Future improvements may include:
 
 -   ~~Docker containerization~~ ✅ (see [Running with Docker](#running-with-docker))
 -   ~~Kafka or RabbitMQ event streaming~~ ✅ (see [Event Streaming with Kafka](#event-streaming-with-kafka))
--   Redis distributed caching
+-   ~~Redis distributed caching~~ ✅ (see [Distributed Caching with Redis](#distributed-caching-with-redis))
 -   Kubernetes deployment
 -   distributed tracing
 -   observability stack
