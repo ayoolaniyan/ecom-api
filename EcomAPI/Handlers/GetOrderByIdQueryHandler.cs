@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using EcomAPI.Caching;
 using EcomAPI.Data;
 using EcomAPI.Handlers;
@@ -27,11 +28,17 @@ public class GetOrderByIdQueryHandler : IRequestHandler<GetOrderByIdQuery, Order
     {
         var key = CacheKeys.Order(request.OrderId);
 
+        var cacheHit = true;
         var order = await _cache.GetOrCreateAsync(
             key,
-            async ct => await LoadOrderAsync(request.OrderId, ct),
+            async ct =>
+            {
+                cacheHit = false;
+                return await LoadOrderAsync(request.OrderId, ct);
+            },
             _entryOptions,
             cancellationToken: cancellationToken);
+        Activity.Current?.SetTag("cache.hit", cacheHit);
 
         // Don't keep "not found": the read model is eventually consistent, so the order may be projected any moment.
         if (order == null)

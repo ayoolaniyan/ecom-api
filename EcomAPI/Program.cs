@@ -6,15 +6,23 @@ using EcomAPI.Handlers;
 using EcomAPI.Health;
 using EcomAPI.Outbox;
 using EcomAPI.Projections;
+using EcomAPI.Tracing;
 using FluentValidation;
 using MediatR;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Hybrid;
+using Microsoft.Extensions.Caching.StackExchangeRedis;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using OpenTelemetry.Instrumentation.StackExchangeRedis;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Stamp every log entry with the current trace/span id, so logs can be matched to traces.
+builder.Logging.Configure(opt => opt.ActivityTrackingOptions = ActivityTrackingOptions.TraceId | ActivityTrackingOptions.SpanId);
 
 // builder.Services.AddDbContext<AppDbContext>(opt => opt.UseSqlite(builder.Configuration.GetConnectionString("BaseConnection")));
 builder.Services.AddDbContext<WriteDbContext>(opt => opt.UseSqlite(builder.Configuration.GetConnectionString("WriteDbConnection")));
@@ -67,6 +75,21 @@ if (cacheOptions.Provider.Equals("Redis", StringComparison.OrdinalIgnoreCase))
         opt.ConfigurationOptions = redis;
         opt.InstanceName = cacheOptions.InstanceName;
     });
+    // With tracing on, register the cache's Redis connection with the Redis instrumentation.
+    builder.Services.AddOptions<RedisCacheOptions>().Configure<IServiceProvider>((opt, sp) =>
+    {
+        var instrumentation = sp.GetService<StackExchangeRedisInstrumentation>();
+        if (instrumentation is null)
+            return;
+
+        var redis = opt.ConfigurationOptions!;
+        opt.ConnectionMultiplexerFactory = async () =>
+        {
+            var connection = await ConnectionMultiplexer.ConnectAsync(redis);
+            instrumentation.AddConnection(connection);
+            return connection;
+        };
+    });
     healthChecks.AddCheck<DistributedCacheHealthCheck>("redis", HealthStatus.Degraded, ["ready"]);
 }
 builder.Services.AddHybridCache(opt =>
@@ -79,7 +102,36 @@ builder.Services.AddHybridCache(opt =>
 });
 // builder.Services.AddScoped<IEventHandler<OrderCreatedEvent>, OrderCreatedProjectionHandler>();
 
-builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof(Program).Assembly));
+builder.Services.AddMediatR(cfg =>
+{
+    cfg.RegisterServicesFromAssembly(typeof(Program).Assembly);
+    cfg.AddOpenBehavior(typeof(TracingBehavior<,>));
+});
+
+// Tracing:Enabled exports traces over OTLP. The trace of a POST continues through the outbox
+// dispatcher, Kafka and the projection (see Tracing/Telemetry.cs).
+var tracingSection = builder.Configuration.GetSection(TracingOptions.SectionName);
+var tracingOptions = tracingSection.Get<TracingOptions>() ?? new TracingOptions();
+if (tracingOptions.Enabled)
+{
+    builder.Services.AddOpenTelemetry()
+        .ConfigureResource(resource => resource
+            .AddService(tracingOptions.ServiceName, serviceVersion: typeof(Program).Assembly.GetName().Version?.ToString())
+            .AddAttributes([new("deployment.environment.name", builder.Environment.EnvironmentName)]))
+        .WithTracing(tracing =>
+        {
+            tracing
+                .SetSampler(new ParentBasedSampler(new TraceIdRatioBasedSampler(tracingOptions.SamplingRatio)))
+                .AddSource(Telemetry.SourceName)
+                // Probes hit the health endpoints every few seconds; don't trace them or their dependency checks.
+                .AddAspNetCoreInstrumentation(opt => opt.Filter = ctx => !ctx.Request.Path.StartsWithSegments("/healthz"))
+                .AddEntityFrameworkCoreInstrumentation()
+                .AddOtlpExporter(opt => opt.Endpoint = new Uri(tracingOptions.OtlpEndpoint));
+
+            if (cacheOptions.Provider.Equals("Redis", StringComparison.OrdinalIgnoreCase))
+                tracing.AddRedisInstrumentation();
+        });
+}
 
 var app = builder.Build();
 

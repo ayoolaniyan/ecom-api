@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using EcomAPI.Caching;
 using EcomAPI.Data;
 using EcomAPI.Events;
 using EcomAPI.Models;
+using EcomAPI.Tracing;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Hybrid;
@@ -23,8 +25,14 @@ namespace EcomAPI.Projections
 
         public async Task Handle(OrderCreatedEvent notification, CancellationToken cancellationToken)
         {
+            using var activity = Telemetry.Source.StartActivity("project OrderCreatedEvent");
+            activity?.SetTag("order.id", notification.OrderId);
+
             // Events are delivered at least once; ignore a redelivery of an order already projected.
-            if (!await _context.Orders.AnyAsync(o => o.Id == notification.OrderId, cancellationToken))
+            var alreadyProjected = await _context.Orders.AnyAsync(o => o.Id == notification.OrderId, cancellationToken);
+            activity?.SetTag("projection.duplicate", alreadyProjected);
+
+            if (!alreadyProjected)
             {
                 var order = new Order
                 {
@@ -53,6 +61,7 @@ namespace EcomAPI.Projections
             }
             catch (Exception ex)
             {
+                Activity.Current?.AddException(ex);
                 // The read model is already updated; a stale cache entry expires on its own TTL.
                 _logger.LogWarning(ex, "Failed to invalidate cache for order {OrderId}", orderId);
             }

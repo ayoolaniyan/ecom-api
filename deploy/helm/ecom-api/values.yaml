@@ -89,6 +89,18 @@ api:
   affinity: {}
 
 # ------------------------------------------------------------------------------
+# Distributed tracing. The API exports OpenTelemetry traces over OTLP/gRPC to a collector
+# or backend you run separately (OpenTelemetry Collector, Jaeger, Tempo, ...).
+# ------------------------------------------------------------------------------
+tracing:
+  enabled: false
+  # Required when enabled, e.g. "http://otel-collector.observability:4317".
+  otlpEndpoint: ""
+  serviceName: ecomapi
+  # Fraction of new traces recorded (0.0–1.0); downstream spans follow the upstream decision.
+  samplingRatio: 1.0
+
+# ------------------------------------------------------------------------------
 # Kafka (Strimzi). Requires the Strimzi Cluster Operator watching the release namespace.
 # ------------------------------------------------------------------------------
 kafka:

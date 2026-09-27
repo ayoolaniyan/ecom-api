@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using EcomAPI.Caching;
 using EcomAPI.Data;
 using MediatR;
@@ -26,18 +27,26 @@ namespace EcomAPI.Handlers
 
         public async Task<List<OrderSummaryDto>> Handle(GetOrdersSummariesQuery request, CancellationToken cancellationToken)
         {
-            return await _cache.GetOrCreateAsync(
+            var cacheHit = true;
+            var summaries = await _cache.GetOrCreateAsync(
                 CacheKeys.OrderSummaries,
-                async ct => await _context.Orders
-                    .AsNoTracking()
-                    .Select(o => new OrderSummaryDto(
-                        o.Id,
-                        o.FirstName + " " + o.LastName,
-                        o.Status,
-                        o.TotalCost
-                    )).ToListAsync(ct),
+                async ct =>
+                {
+                    cacheHit = false;
+                    return await _context.Orders
+                        .AsNoTracking()
+                        .Select(o => new OrderSummaryDto(
+                            o.Id,
+                            o.FirstName + " " + o.LastName,
+                            o.Status,
+                            o.TotalCost
+                        )).ToListAsync(ct);
+                },
                 _entryOptions,
                 cancellationToken: cancellationToken);
+            Activity.Current?.SetTag("cache.hit", cacheHit);
+
+            return summaries;
         }
     }
 }

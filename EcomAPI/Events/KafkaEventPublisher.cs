@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using System.Text;
 using Confluent.Kafka;
 using EcomAPI.Outbox;
+using EcomAPI.Tracing;
 using Microsoft.Extensions.Options;
 
 namespace EcomAPI.Events
@@ -33,6 +35,14 @@ namespace EcomAPI.Events
 
         public async Task PublishAsync(OutboxMessage message, CancellationToken cancellationToken = default)
         {
+            using var activity = Telemetry.Source.StartActivity($"send {_options.Topic}", ActivityKind.Producer);
+            activity?.SetTag("messaging.system", "kafka");
+            activity?.SetTag("messaging.operation.type", "send");
+            activity?.SetTag("messaging.operation.name", "send");
+            activity?.SetTag("messaging.destination.name", _options.Topic);
+            activity?.SetTag("messaging.kafka.message.key", message.Key);
+            activity?.SetTag("messaging.message.id", message.Id.ToString());
+
             // Keying by aggregate id keeps all events for one order on the same partition, in order.
             var kafkaMessage = new Message<string, string>
             {
@@ -45,10 +55,24 @@ namespace EcomAPI.Events
                 }
             };
 
-            var result = await _producer.ProduceAsync(_options.Topic, kafkaMessage, cancellationToken);
+            // traceparent/tracestate headers let the consumer continue this trace.
+            Telemetry.Inject(activity?.Context ?? Activity.Current?.Context ?? default, kafkaMessage.Headers);
 
-            _logger.LogInformation("Published {EventType} (outbox {MessageId}) to {TopicPartitionOffset}",
-                message.Type, message.Id, result.TopicPartitionOffset);
+            try
+            {
+                var result = await _producer.ProduceAsync(_options.Topic, kafkaMessage, cancellationToken);
+
+                activity?.SetTag("messaging.destination.partition.id", result.Partition.Value.ToString());
+                activity?.SetTag("messaging.kafka.offset", result.Offset.Value);
+
+                _logger.LogInformation("Published {EventType} (outbox {MessageId}) to {TopicPartitionOffset}",
+                    message.Type, message.Id, result.TopicPartitionOffset);
+            }
+            catch (Exception ex)
+            {
+                activity.RecordException(ex);
+                throw;
+            }
         }
 
         public void Dispose()
