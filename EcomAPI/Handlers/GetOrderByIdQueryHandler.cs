@@ -2,6 +2,7 @@ using System.Diagnostics;
 using EcomAPI.Caching;
 using EcomAPI.Data;
 using EcomAPI.Handlers;
+using EcomAPI.Observability;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Hybrid;
@@ -39,6 +40,7 @@ public class GetOrderByIdQueryHandler : IRequestHandler<GetOrderByIdQuery, Order
             _entryOptions,
             cancellationToken: cancellationToken);
         Activity.Current?.SetTag("cache.hit", cacheHit);
+        AppMetrics.CacheLookup(nameof(GetOrderByIdQuery), cacheHit);
 
         // Don't keep "not found": the read model is eventually consistent, so the order may be projected any moment.
         if (order == null)

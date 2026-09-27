@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using EcomAPI.Caching;
 using EcomAPI.Data;
+using EcomAPI.Observability;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Hybrid;
@@ -45,6 +46,7 @@ namespace EcomAPI.Handlers
                 _entryOptions,
                 cancellationToken: cancellationToken);
             Activity.Current?.SetTag("cache.hit", cacheHit);
+            AppMetrics.CacheLookup(nameof(GetOrdersSummariesQuery), cacheHit);
 
             return summaries;
         }

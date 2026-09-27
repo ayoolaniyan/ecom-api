@@ -1,0 +1,11 @@
+# Loads the *.json dashboards mounted at /var/lib/grafana/dashboards (the Helm chart's files/
+# directory, see docker-compose.yml), so Compose and Kubernetes show the same dashboard.
+apiVersion: 1
+
+providers:
+  - name: ecom-api
+    folder: eComAPI
+    type: file
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

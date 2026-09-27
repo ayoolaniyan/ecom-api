@@ -4,7 +4,7 @@ using Confluent.Kafka;
 using OpenTelemetry;
 using OpenTelemetry.Context.Propagation;
 
-namespace EcomAPI.Tracing
+namespace EcomAPI.Observability
 {
     // The application's ActivitySource and helpers for carrying W3C trace context across
     // the asynchronous hops (outbox row, Kafka headers) that auto-instrumentation can't see.

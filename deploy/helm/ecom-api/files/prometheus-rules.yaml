@@ -1,0 +1,100 @@
+# Alert rules for the eComAPI. Loaded by Prometheus in Docker Compose and rendered into a
+# PrometheusRule by the Helm chart (monitoring.prometheusRule.enabled), so keep this file a
+# plain Prometheus rule file. Series are selected by job="ecomapi", the OpenTelemetry
+# service.name (Telemetry:ServiceName).
+groups:
+  - name: ecomapi.http
+    rules:
+      - alert: EcomApiMetricsMissing
+        expr: absent(dotnet_process_memory_working_set_bytes{job="ecomapi"})
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: eComAPI is not reporting metrics
+          description: No metrics from the API for 2 minutes. The process may be down, or the OTLP export to the collector may be failing.
+
+      - alert: EcomApiHighErrorRate
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{job="ecomapi", http_response_status_code=~"5.."}[5m]))
+            /
+          sum(rate(http_server_request_duration_seconds_count{job="ecomapi"}[5m]))
+            > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: More than 5% of eComAPI requests fail
+          description: '{{ $value | humanizePercentage }} of requests returned a 5xx status over the last 5 minutes.'
+
+      - alert: EcomApiHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{job="ecomapi"}[5m]))
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: eComAPI p95 latency above 500ms on {{ $labels.http_route }}
+          description: p95 latency is {{ $value | humanizeDuration }}.
+
+  - name: ecomapi.pipeline
+    rules:
+      # The oldest unpublished message keeps ageing while the dispatcher is stuck or the broker is down.
+      - alert: EcomOutboxStalled
+        expr: max(ecom_outbox_oldest_pending_age_seconds{job="ecomapi"}) > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Outbox events are not being published
+          description: The oldest unpublished outbox message is {{ $value | humanizeDuration }} old. New orders will not reach the read model.
+
+      - alert: EcomOutboxPublishFailures
+        expr: sum(rate(ecom_outbox_published_total{job="ecomapi", outcome="failure"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Outbox publishes to the event bus are failing
+          description: The outbox dispatcher keeps failing to publish; check the Kafka broker and the dispatcher logs.
+
+      - alert: EcomEventProcessingRetries
+        expr: sum by (event_type) (rate(ecom_events_processed_total{job="ecomapi", outcome="retry"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.event_type }} projections keep failing'
+          description: A projection handler is failing and the event is being retried; the read model is falling behind.
+
+      - alert: EcomEventsSkipped
+        expr: sum by (event_type) (increase(ecom_events_processed_total{job="ecomapi", outcome="skipped"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Unknown or malformed events were skipped
+          description: '{{ $value | humanize }} {{ $labels.event_type }} events were skipped in the last 15 minutes and will not be projected.'
+
+      - alert: EcomProjectionLagHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(ecom_projection_lag_seconds_bucket{job="ecomapi"}[5m]))
+          ) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: New orders take more than 10s to appear in the read model
+          description: p95 time from write to read model is {{ $value | humanizeDuration }}.
+
+      # Needs a Kafka consumer-lag exporter (kafka-exporter in Docker Compose, or Strimzi's Kafka Exporter).
+      - alert: EcomKafkaConsumerLag
+        expr: sum(kafka_consumergroup_lag{consumergroup="ecomapi-read-projection"}) > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: The read-model projection is falling behind Kafka
+          description: The ecomapi-read-projection consumer group is {{ $value }} messages behind.

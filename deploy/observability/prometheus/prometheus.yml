@@ -1,0 +1,32 @@
+# Prometheus for Docker Compose. Application metrics arrive through the OpenTelemetry
+# Collector; Tempo also remote-writes span metrics and the service graph here.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Shared with the Helm chart's PrometheusRule (deploy/helm/ecom-api/files).
+rule_files:
+  - /etc/prometheus/rules/*.yaml
+
+scrape_configs:
+  # The API's metrics, as exposed by the collector's prometheus exporter. honor_labels keeps
+  # job="ecomapi" (from service.name) instead of replacing it with this scrape job's name.
+  - job_name: otel-collector
+    honor_labels: true
+    scrape_protocols: [OpenMetricsText1.0.0, PrometheusText0.0.4]
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  # The collector's own health (accepted/refused/exported telemetry).
+  - job_name: otel-collector-internal
+    static_configs:
+      - targets: ["otel-collector:8888"]
+
+  # Consumer group lag and topic offsets, read from the broker.
+  - job_name: kafka-exporter
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

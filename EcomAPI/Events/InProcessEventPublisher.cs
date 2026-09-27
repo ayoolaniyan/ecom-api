@@ -1,6 +1,6 @@
 using System.Diagnostics;
 using EcomAPI.Outbox;
-using EcomAPI.Tracing;
+using EcomAPI.Observability;
 using MediatR;
 
 namespace EcomAPI.Events
@@ -30,12 +30,23 @@ namespace EcomAPI.Events
             {
                 activity?.SetStatus(ActivityStatusCode.Error, "Unknown event type; skipped");
                 _logger.LogWarning("Skipping outbox message {MessageId}: unknown event type {EventType}", message.Id, message.Type);
+                AppMetrics.EventProcessed("in-process", message.Type, "skipped");
                 return;
             }
 
-            using var scope = _scopeFactory.CreateScope();
-            var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
-            await mediator.Publish(evt, cancellationToken);
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
+                await mediator.Publish(evt, cancellationToken);
+                AppMetrics.EventProcessed("in-process", message.Type, "success");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // OutboxDispatcher keeps the message and retries it on its next poll.
+                AppMetrics.EventProcessed("in-process", message.Type, "retry");
+                throw;
+            }
         }
     }
 }

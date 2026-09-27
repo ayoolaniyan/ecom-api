@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
-using EcomAPI.Tracing;
+using EcomAPI.Observability;
 using MediatR;
 using Microsoft.Extensions.Options;
 using OpenTelemetry;
@@ -113,6 +113,7 @@ namespace EcomAPI.Events
                 activity?.SetTag("messaging.message.skipped", true);
                 _logger.LogWarning("Skipping message at {TopicPartitionOffset} with event type {EventType}", result.TopicPartitionOffset, eventType);
                 consumer.Commit(result);
+                AppMetrics.EventProcessed("kafka", eventType, "skipped");
                 return;
             }
 
@@ -123,6 +124,7 @@ namespace EcomAPI.Events
                 await mediator.Publish(evt, stoppingToken);
 
                 consumer.Commit(result);
+                AppMetrics.EventProcessed("kafka", eventType, "success");
                 _logger.LogInformation("Handled {EventType} from {TopicPartitionOffset}", eventType, result.TopicPartitionOffset);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -130,6 +132,7 @@ namespace EcomAPI.Events
                 // Rewind so the same message is delivered again on the next Consume().
                 activity.RecordException(ex);
                 activity?.SetTag("messaging.message.retried", true);
+                AppMetrics.EventProcessed("kafka", eventType, "retry");
                 _logger.LogError(ex, "Failed to handle {EventType} from {TopicPartitionOffset}; retrying in {Delay}",
                     eventType, result.TopicPartitionOffset, RetryDelay);
                 consumer.Seek(result.TopicPartitionOffset);

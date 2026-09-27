@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using EcomAPI.Data;
 using EcomAPI.Events;
-using EcomAPI.Tracing;
+using EcomAPI.Observability;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using OpenTelemetry;
@@ -66,7 +66,10 @@ namespace EcomAPI.Outbox
             }
 
             if (messages.Count == 0)
+            {
+                AppMetrics.OutboxBacklog(0, null);
                 return;
+            }
 
             foreach (var message in messages)
             {
@@ -81,10 +84,12 @@ namespace EcomAPI.Outbox
                     await _publisher.PublishAsync(message, stoppingToken);
                     message.ProcessedAt = DateTime.UtcNow;
                     message.Error = null;
+                    AppMetrics.OutboxPublishSucceeded(message.Type, message.OccurredAt);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     activity.RecordException(ex);
+                    AppMetrics.OutboxPublishFailed(message.Type);
                     message.Attempts++;
                     message.Error = ex.Message;
                     _logger.LogWarning(ex, "Failed to publish outbox message {MessageId} (attempt {Attempts})", message.Id, message.Attempts);
@@ -97,7 +102,18 @@ namespace EcomAPI.Outbox
             using (SuppressInstrumentationScope.Begin())
             {
                 await context.SaveChangesAsync(CancellationToken.None);
+                await MeasureBacklogAsync(context, stoppingToken);
             }
+        }
+
+        // Records what is still waiting after this poll, so a growing or stuck outbox shows up in metrics.
+        private static async Task MeasureBacklogAsync(WriteDbContext context, CancellationToken stoppingToken)
+        {
+            var pending = context.OutboxMessages.Where(m => m.ProcessedAt == null);
+            var count = await pending.LongCountAsync(stoppingToken);
+            var oldest = count == 0 ? null : await pending.MinAsync(m => (DateTime?)m.OccurredAt, stoppingToken);
+
+            AppMetrics.OutboxBacklog(count, oldest);
         }
     }
 }

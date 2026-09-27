@@ -89,16 +89,42 @@ api:
   affinity: {}
 
 # ------------------------------------------------------------------------------
-# Distributed tracing. The API exports OpenTelemetry traces over OTLP/gRPC to a collector
-# or backend you run separately (OpenTelemetry Collector, Jaeger, Tempo, ...).
+# Observability. The API exports OpenTelemetry traces, metrics and logs over OTLP/gRPC to
+# a collector you run separately (e.g. the OpenTelemetry Collector in front of Tempo,
+# Prometheus and Loki). Each signal is switched on separately.
 # ------------------------------------------------------------------------------
-tracing:
-  enabled: false
-  # Required when enabled, e.g. "http://otel-collector.observability:4317".
+telemetry:
+  # Required when any signal is enabled, e.g. "http://otel-collector.observability:4317".
   otlpEndpoint: ""
+  # Becomes the job label of the metrics; the dashboard and alert rules expect "ecomapi".
   serviceName: ecomapi
-  # Fraction of new traces recorded (0.0–1.0); downstream spans follow the upstream decision.
-  samplingRatio: 1.0
+  tracing:
+    enabled: false
+    # Fraction of new traces recorded (0.0–1.0); downstream spans follow the upstream decision.
+    samplingRatio: 1.0
+  metrics:
+    enabled: false
+    exportIntervalMs: 15000
+  logs:
+    enabled: false
+
+# Monitoring resources for a Prometheus Operator / Grafana setup such as kube-prometheus-stack.
+monitoring:
+  # ConfigMap holding the eComAPI Grafana dashboard (files/grafana-dashboard.json), picked up
+  # by the Grafana dashboard sidecar through the label below.
+  grafanaDashboard:
+    enabled: false
+    # Defaults to the release namespace; set it if the sidecar only watches one namespace.
+    namespace: ""
+    labels:
+      grafana_dashboard: "1"
+    annotations: {}
+  # PrometheusRule with the alert rules in files/prometheus-rules.yaml. Needs the
+  # monitoring.coreos.com CRDs.
+  prometheusRule:
+    enabled: false
+    # Extra labels, e.g. {release: kube-prometheus-stack} to match the Prometheus ruleSelector.
+    labels: {}
 
 # ------------------------------------------------------------------------------
 # Kafka (Strimzi). Requires the Strimzi Cluster Operator watching the release namespace.
