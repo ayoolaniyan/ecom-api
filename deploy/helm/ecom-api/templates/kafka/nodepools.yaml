@@ -1,0 +1,54 @@
+{{- if .Values.kafka.enabled }}
+{{- $cluster := include "ecom-api.kafka.clusterName" . }}
+{{- range .Values.kafka.nodePools }}
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "ecom-api.labels" $ | nindent 4 }}
+    {{- include "ecom-api.selectorLabels" (dict "ctx" $ "component" "kafka") | nindent 4 }}
+    strimzi.io/cluster: {{ $cluster }}
+spec:
+  replicas: {{ .replicas }}
+  roles:
+    {{- toYaml .roles | nindent 4 }}
+  storage:
+    # JBOD with a single volume, so more disks can be added later without recreating the pool.
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: {{ .storage.size }}
+        {{- with .storage.class }}
+        class: {{ . }}
+        {{- end }}
+        deleteClaim: {{ .storage.deleteClaim }}
+        kraftMetadata: shared
+  {{- with .resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .jvmOptions }}
+  jvmOptions:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if ne $.Values.kafka.podAntiAffinity "none" }}
+  template:
+    pod:
+      affinity:
+        podAntiAffinity:
+          {{- $term := dict "topologyKey" "kubernetes.io/hostname" "labelSelector" (dict "matchLabels" (dict "strimzi.io/cluster" $cluster "strimzi.io/pool-name" .name)) }}
+          {{- if eq $.Values.kafka.podAntiAffinity "required" }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            {{- toYaml (list $term) | nindent 12 }}
+          {{- else }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                {{- toYaml $term | nindent 16 }}
+          {{- end }}
+  {{- end }}
+{{- end }}
+{{- end }}

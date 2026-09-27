@@ -1,0 +1,21 @@
+{{- $api := include "ecom-api.api.fullname" . -}}
+ecom-api {{ .Chart.AppVersion }} is deployed to namespace "{{ .Release.Namespace }}".
+{{ if .Values.kafka.enabled }}
+Kafka cluster "{{ include "ecom-api.kafka.clusterName" . }}" is created by the Strimzi Cluster Operator and
+takes a few minutes to become ready. Watch it with:
+
+  kubectl -n {{ .Release.Namespace }} get kafka,kafkanodepool,kafkatopic,pods
+
+The API reports Kafka as Degraded on /healthz/ready until the cluster is up; orders are
+kept in the outbox and published once it is.
+{{- end }}
+
+Reach the API:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $api }} 8080:{{ .Values.api.service.port }}
+  curl http://localhost:8080/healthz/ready
+  curl http://localhost:8080/api/orders
+
+Run the end-to-end smoke test:
+
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }} --logs

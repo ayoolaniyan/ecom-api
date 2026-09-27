@@ -1,0 +1,107 @@
+{{- if gt (int .Values.api.replicaCount) 1 }}
+{{- fail "api.replicaCount must be 1: the API stores its data in SQLite on a ReadWriteOnce volume and cannot be scaled out" }}
+{{- end }}
+{{- $redis := include "ecom-api.redis.connection" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ecom-api.api.fullname" . }}
+  labels:
+    {{- include "ecom-api.labels" . | nindent 4 }}
+    {{- include "ecom-api.selectorLabels" (dict "ctx" . "component" "api") | nindent 4 }}
+spec:
+  replicas: {{ .Values.api.replicaCount }}
+  # Stop the old pod before starting the new one, so only one process ever has the SQLite files open.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "ecom-api.selectorLabels" (dict "ctx" . "component" "api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ecom-api.labels" . | nindent 8 }}
+        {{- include "ecom-api.selectorLabels" (dict "ctx" . "component" "api") | nindent 8 }}
+      annotations:
+        # Roll the pod when its configuration changes.
+        checksum/config: {{ include (print $.Template.BasePath "/api/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/api/secret.yaml") . | sha256sum }}
+        {{- with .Values.api.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.api.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.api.podSecurityContext | nindent 8 }}
+      # Give the Kafka consumer time to leave its group and the producer time to flush.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api
+          image: {{ include "ecom-api.api.image" . | quote }}
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.api.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "ecom-api.api.fullname" . }}
+            {{- if $redis }}
+            - secretRef:
+                name: {{ include "ecom-api.api.fullname" . }}
+            {{- end }}
+          {{- with .Values.api.config.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          startupProbe:
+            httpGet:
+              path: /healthz/live
+              port: http
+            periodSeconds: {{ .Values.api.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.api.probes.startup.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: http
+            periodSeconds: {{ .Values.api.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.api.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.api.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /healthz/ready
+              port: http
+            periodSeconds: {{ .Values.api.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.api.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.api.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            # readOnlyRootFilesystem: .NET still needs a writable temp directory.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "ecom-api.api.fullname" . }}-data
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

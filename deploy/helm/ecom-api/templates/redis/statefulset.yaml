@@ -1,0 +1,76 @@
+{{- if .Values.redis.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "ecom-api.redis.fullname" . }}
+  labels:
+    {{- include "ecom-api.labels" . | nindent 4 }}
+    {{- include "ecom-api.selectorLabels" (dict "ctx" . "component" "redis") | nindent 4 }}
+spec:
+  serviceName: {{ include "ecom-api.redis.fullname" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "ecom-api.selectorLabels" (dict "ctx" . "component" "redis") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ecom-api.labels" . | nindent 8 }}
+        {{- include "ecom-api.selectorLabels" (dict "ctx" . "component" "redis") | nindent 8 }}
+    spec:
+      securityContext:
+        # UID/GID of the "redis" user in the official image.
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
+          imagePullPolicy: {{ .Values.redis.image.pullPolicy }}
+          # Append-only file so cached entries survive a restart; bounded memory with LRU eviction.
+          args:
+            - redis-server
+            - --appendonly
+            - "yes"
+            - --maxmemory
+            - {{ .Values.redis.maxmemory | quote }}
+            - --maxmemory-policy
+            - {{ .Values.redis.maxmemoryPolicy | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.redis.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.redis.persistence.size }}
+{{- end }}

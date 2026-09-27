@@ -3,12 +3,15 @@ using EcomAPI.Commands;
 using EcomAPI.Data;
 using EcomAPI.Events;
 using EcomAPI.Handlers;
+using EcomAPI.Health;
 using EcomAPI.Outbox;
 using EcomAPI.Projections;
 using FluentValidation;
 using MediatR;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Hybrid;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -16,6 +19,12 @@ var builder = WebApplication.CreateBuilder(args);
 // builder.Services.AddDbContext<AppDbContext>(opt => opt.UseSqlite(builder.Configuration.GetConnectionString("BaseConnection")));
 builder.Services.AddDbContext<WriteDbContext>(opt => opt.UseSqlite(builder.Configuration.GetConnectionString("WriteDbConnection")));
 builder.Services.AddDbContext<ReadDbContext>(opt => opt.UseSqlite(builder.Configuration.GetConnectionString("ReadDbConnection")));
+
+// Checks tagged "ready" back /healthz/ready. The databases are required; Kafka and Redis only report
+// Degraded, since the outbox buffers writes and reads fall back to the database while they are down.
+var healthChecks = builder.Services.AddHealthChecks()
+    .AddDbContextCheck<WriteDbContext>("write-db", tags: ["ready"])
+    .AddDbContextCheck<ReadDbContext>("read-db", tags: ["ready"]);
 
 // builder.Services.AddScoped<ICommandHandler<CreateOrderCommand, OrderDto>, CreateOrderCommandHandler>();
 // builder.Services.AddScoped<IQueryHandler<GetOrderByIdQuery, OrderDto>, GetOrderByIdQueryHandler>();
@@ -31,6 +40,8 @@ if (eventBusProvider.Equals("Kafka", StringComparison.OrdinalIgnoreCase))
 {
     builder.Services.AddSingleton<IEventPublisher, KafkaEventPublisher>();
     builder.Services.AddHostedService<KafkaEventConsumer>();
+    builder.Services.AddSingleton<KafkaHealthCheck>();
+    healthChecks.AddCheck<KafkaHealthCheck>("kafka", HealthStatus.Degraded, ["ready"]);
 }
 else
 {
@@ -56,6 +67,7 @@ if (cacheOptions.Provider.Equals("Redis", StringComparison.OrdinalIgnoreCase))
         opt.ConfigurationOptions = redis;
         opt.InstanceName = cacheOptions.InstanceName;
     });
+    healthChecks.AddCheck<DistributedCacheHealthCheck>("redis", HealthStatus.Degraded, ["ready"]);
 }
 builder.Services.AddHybridCache(opt =>
 {
@@ -77,6 +89,14 @@ using (var scope = app.Services.CreateScope())
     scope.ServiceProvider.GetRequiredService<WriteDbContext>().Database.Migrate();
     scope.ServiceProvider.GetRequiredService<ReadDbContext>().Database.Migrate();
 }
+
+// Liveness only proves the process is serving requests; readiness also checks the dependencies.
+app.MapHealthChecks("/healthz/live", new HealthCheckOptions { Predicate = _ => false });
+app.MapHealthChecks("/healthz/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready"),
+    ResponseWriter = HealthCheckResponseWriter.WriteAsync
+});
 
 app.MapPost("/api/orders", async (IMediator mediator, CreateOrderCommand command) =>
 {
